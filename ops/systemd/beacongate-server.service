@@ -1,0 +1,23 @@
+[Unit]
+Description=BeaconGate relay server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=beacongate
+Group=beacongate
+EnvironmentFile=-/etc/beacongate/server.env
+ExecStart=/usr/local/bin/beacongate-server -config /etc/beacongate/server_config.json
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/beacongate
+
+[Install]
+WantedBy=multi-user.target

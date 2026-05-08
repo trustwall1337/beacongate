@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  beacongate-server:
+    build:
+      context: ../..
+      dockerfile: ops/docker/Dockerfile.server
+    container_name: beacongate-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./config:/etc/beacongate:ro
+      - beacongate-state:/var/lib/beacongate
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  beacongate-state:

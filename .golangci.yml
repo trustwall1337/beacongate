@@ -1,0 +1,79 @@
+# golangci-lint v2 configuration for BeaconGate.
+# Conservative defaults that match real-world Go monorepo style.
+# See https://golangci-lint.run/usage/configuration/ for the full schema.
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  default: none
+  enable:
+    - errcheck       # unchecked errors
+    - govet          # standard go vet
+    - ineffassign    # ineffectual assignments
+    - staticcheck    # broad correctness checks
+    - unused         # unused declarations
+    - revive         # replacement for golint
+    - gocritic       # style/perf/diagnostic checks
+    - bodyclose      # http response body must be closed
+    - misspell       # common spelling mistakes
+    - unconvert      # redundant conversions
+    - prealloc       # slice preallocation hints
+    - gosec          # security checks (subset)
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+        - name: error-return
+        - name: error-strings
+        - name: receiver-naming
+        - name: indent-error-flow
+        - name: increment-decrement
+        - name: range-val-in-closure
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+      disabled-checks:
+        - ifElseChain   # noisy on intentional flat conditionals
+    gosec:
+      excludes:
+        - G104  # unhandled errors — errcheck already covers this with more nuance
+        - G404  # not all rand uses need crypto/rand; we use crypto/rand where it matters
+  exclusions:
+    paths:
+      - docs
+      - ops
+      - desktop
+      - mobile
+      - protocol
+      - tools
+    rules:
+      # Tests can be more relaxed.
+      - path: _test\.go$
+        linters:
+          - errcheck
+          - gosec
+          - prealloc
+      # Generated wire types may have a lot of fields by design.
+      - path: engine/protocol/encode\.go$
+        linters:
+          - gocritic
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/trustwall1337/beacongate
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

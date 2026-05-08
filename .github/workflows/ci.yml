@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+# Path filters keep the Go pipeline from firing on changes that only
+# touch a non-Go subtree. As desktop/, mobile/, etc. land, each gets
+# its own workflow file scoped to the same way.
+jobs:
+  go:
+    name: go / build / vet / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: |
+      contains(toJSON(github.event.head_commit.modified || ''), 'cmd/') ||
+      contains(toJSON(github.event.head_commit.modified || ''), 'engine/') ||
+      contains(toJSON(github.event.head_commit.modified || ''), 'client/') ||
+      contains(toJSON(github.event.head_commit.modified || ''), 'server/') ||
+      contains(toJSON(github.event.head_commit.modified || ''), 'test/') ||
+      contains(toJSON(github.event.head_commit.modified || ''), 'go.mod') ||
+      contains(toJSON(github.event.head_commit.modified || ''), 'go.sum') ||
+      github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test ./... -count=1 -timeout 5m
+
+      - name: go test -race
+        run: go test -race ./... -count=1 -timeout 10m
+
+  go-lint:
+    name: go / golangci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  go-vuln:
+    name: go / govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  # Future workflows: desktop/, mobile/ each get their own file scoped
+  # via paths-ignore / paths in on.* triggers (workflow_dispatch + push
+  # filters), keeping the Go pipeline lean.

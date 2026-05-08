@@ -1,0 +1,14 @@
+{
+  "client_id": "client-alpha",
+  "listen_addr": "127.0.0.1:1080",
+  "server": {
+    "url": "https://relay.example.com/tunnel",
+    "key": "REPLACE_ME_WITH_BASE64_32_BYTE_KEY=="
+  },
+  "transport": {
+    "type": "google",
+    "options": {
+      "fronting_host": "www.googleapis.com"
+    }
+  }
+}

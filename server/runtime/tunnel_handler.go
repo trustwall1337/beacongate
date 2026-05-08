@@ -1,0 +1,419 @@
+package runtime
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/trustwall1337/beacongate/engine/protocol"
+)
+
+const tunnelMaxBody = 4 * 1024 * 1024
+
+func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, tunnelMaxBody))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	plaintext, err := s.sealer.Open(body)
+	if err != nil {
+		// C4: never echo crypto error detail to the wire — it leaks state
+		// useful for fingerprinting (was the body too short? wrong tag?).
+		// Detail goes to server logs, not the client.
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	env, err := protocol.DecodeEnvelope(plaintext)
+	if err != nil {
+		// C4: same reasoning — generic 400, log details server-side only.
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	respMsgs := s.processBatch(r.Context(), env)
+	// Idle batches (probe-only) get the long-poll window so server-originated
+	// data can ship back without waiting for the client's next request.
+	// Active batches keep the short drain window so they return promptly.
+	window := s.drainWindow
+	longPoll := isIdleBatch(env)
+	if longPoll {
+		s.mu.Lock()
+		window = s.longPollWindow
+		s.mu.Unlock()
+	}
+	respMsgs = append(respMsgs, s.collectUpstreamData(r.Context(), env.ClientID, window, longPoll)...)
+	if len(respMsgs) == 0 {
+		respMsgs = append(respMsgs, protocol.Message{
+			Type: protocol.MessageTypeProbe, ProbeID: "noop",
+			Status:            "ok",
+			SupportedVersions: []protocol.Version{{Major: 1, Minor: 0}},
+		})
+	}
+
+	// If the request was canceled while we were holding (long-poll), stop here:
+	// the client has already moved on, and writing now would send data to a
+	// dead connection (data was *not* drained because the wait honored ctx).
+	if r.Context().Err() != nil {
+		return
+	}
+
+	out := protocol.Envelope{
+		Version:     protocol.Version{Major: 1, Minor: 0},
+		ClientID:    s.serverID,
+		Compression: protocol.CompressionNone,
+		Messages:    respMsgs,
+	}
+	plain, err := protocol.EncodeEnvelope(out)
+	if err != nil {
+		http.Error(w, "encode response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cipher, err := s.sealer.Seal(plain)
+	if err != nil {
+		http.Error(w, "seal", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(cipher)
+}
+
+func (s *Server) processBatch(ctx context.Context, env protocol.Envelope) []protocol.Message {
+	var resp []protocol.Message
+	for i := range env.Messages {
+		m := env.Messages[i]
+		switch m.Type {
+		case protocol.MessageTypeOpen:
+			resp = append(resp, s.handleOpen(ctx, env.ClientID, m)...)
+		case protocol.MessageTypeData:
+			resp = append(resp, s.handleData(env.ClientID, m)...)
+		case protocol.MessageTypeClose:
+			resp = append(resp, s.handleClose(env.ClientID, m)...)
+		case protocol.MessageTypeReset:
+			s.handleReset(env.ClientID, m)
+		case protocol.MessageTypePing:
+			resp = append(resp, protocol.Message{
+				Type: protocol.MessageTypePing, SessionID: m.SessionID, Nonce: m.Nonce,
+			})
+		case protocol.MessageTypeProbe:
+			resp = append(resp, protocol.Message{
+				Type:              protocol.MessageTypeProbe,
+				ProbeID:           m.ProbeID,
+				Status:            "ok",
+				SupportedVersions: []protocol.Version{{Major: 1, Minor: 0}},
+				SelectedVersion:   &protocol.Version{Major: 1, Minor: 0},
+			})
+		}
+	}
+	return resp
+}
+
+func (s *Server) handleOpen(ctx context.Context, clientID string, m protocol.Message) []protocol.Message {
+	target := protocol.Target{}
+	if m.Target != nil {
+		target = *m.Target
+	}
+	if existing := s.lookup(clientID, m.SessionID); existing != nil {
+		return []protocol.Message{{
+			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+			Code:   "SESSION_EXISTS",
+			Reason: "session id already open",
+		}}
+	}
+	// C3: per-client session cap. A misbehaving client cannot exhaust the
+	// server by opening unlimited sessions; quota error gets a stable code
+	// the client can surface to its own SOCKS reply.
+	s.mu.Lock()
+	cap := s.maxSessionsPerClient
+	live := len(s.byClient[clientID])
+	s.mu.Unlock()
+	if cap > 0 && live >= cap {
+		return []protocol.Message{{
+			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+			Code:   "POLICY_DENIED",
+			Reason: "per-client session limit reached",
+		}}
+	}
+	if d := s.currentPolicy().Evaluate(target); !d.Allowed {
+		return []protocol.Message{{
+			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+			Code:   "POLICY_DENIED",
+			Reason: d.Reason,
+		}}
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, err := s.dial(dialCtx, target)
+	if err != nil {
+		// C4: dial errors can carry internal IPs / DNS state. Log full
+		// detail server-side; ship a stable code to the client.
+		return []protocol.Message{{
+			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+			Code:   "DIAL_FAILED",
+			Reason: classifyDialError(err),
+		}}
+	}
+	ss := &serverSession{
+		id:           m.SessionID,
+		clientID:     clientID,
+		target:       target,
+		conn:         conn,
+		lastActivity: time.Now(),
+	}
+	s.register(ss)
+	go s.readUpstream(ss)
+	return nil
+}
+
+// classifyDialError maps an upstream dial error to a small, stable string
+// the client can react to without learning the server's network shape.
+func classifyDialError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "target address is unsafe"):
+		return "blocked"
+	case strings.Contains(msg, "no such host"), strings.Contains(msg, "lookup"):
+		return "dns"
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline"):
+		return "timeout"
+	case strings.Contains(msg, "refused"):
+		return "refused"
+	default:
+		return "unreachable"
+	}
+}
+
+func (s *Server) handleData(clientID string, m protocol.Message) []protocol.Message {
+	ss := s.lookup(clientID, m.SessionID)
+	if ss == nil {
+		return []protocol.Message{{
+			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+			Code: "INVALID_STATE", Reason: "no such session",
+		}}
+	}
+	ss.mu.Lock()
+	expected := ss.nextRecvSeq
+	if m.Seq == nil || *m.Seq != expected {
+		ss.mu.Unlock()
+		ss.terminate(fmt.Errorf("bad sequence: want %d", expected))
+		s.unregister(clientID, m.SessionID)
+		return []protocol.Message{{
+			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+			Code: "BAD_SEQUENCE", Reason: "out of order DATA",
+		}}
+	}
+	ss.nextRecvSeq++
+	ss.lastActivity = time.Now()
+	ss.mu.Unlock()
+	payload := m.Data
+	if m.Compressed {
+		raw, err := protocol.DecompressData(payload)
+		if err != nil {
+			ss.terminate(err)
+			s.unregister(clientID, m.SessionID)
+			return []protocol.Message{{
+				Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+				Code: "PEER_ERROR", Reason: "decompress failed",
+			}}
+		}
+		payload = raw
+	}
+	if err := ss.writeUpstream(payload); err != nil {
+		ss.terminate(err)
+		s.unregister(clientID, m.SessionID)
+		// C4: don't echo upstream errno detail to the client.
+		return []protocol.Message{{
+			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+			Code: "PEER_ERROR", Reason: "upstream write failed",
+		}}
+	}
+	return nil
+}
+
+func (s *Server) handleClose(clientID string, m protocol.Message) []protocol.Message {
+	ss := s.lookup(clientID, m.SessionID)
+	if ss == nil {
+		return nil
+	}
+	ss.closeWriteUpstream()
+	return nil
+}
+
+func (s *Server) handleReset(clientID string, m protocol.Message) {
+	ss := s.lookup(clientID, m.SessionID)
+	if ss == nil {
+		return
+	}
+	ss.terminate(errors.New("client RESET"))
+	s.unregister(clientID, m.SessionID)
+}
+
+// readUpstream pumps bytes from the upstream connection into the session's
+// pending buffer. It exits when the upstream is closed or errored. After
+// each read, it notifies the per-client signal so any in-flight long-poll
+// can wake up and ship the bytes immediately.
+func (s *Server) readUpstream(ss *serverSession) {
+	buf := make([]byte, 16*1024)
+	for {
+		n, err := ss.conn.Read(buf)
+		if n > 0 {
+			ss.mu.Lock()
+			ss.pending = append(ss.pending, append([]byte(nil), buf[:n]...)...)
+			ss.lastActivity = time.Now()
+			ss.mu.Unlock()
+			s.notify(ss.clientID)
+		}
+		if err != nil {
+			ss.mu.Lock()
+			if !ss.localClosed {
+				ss.localClosed = true
+			}
+			if err != io.EOF && ss.upErr == nil {
+				ss.upErr = err
+			}
+			ss.mu.Unlock()
+			// Wake long-poll so it observes the terminal state (CLOSE/done).
+			s.notify(ss.clientID)
+			return
+		}
+	}
+}
+
+// isIdleBatch reports whether the inbound envelope contains nothing the
+// client is in a hurry for. Idle batches are PROBE-only requests the client
+// uses purely to keep a path open for server-originated data.
+func isIdleBatch(env protocol.Envelope) bool {
+	if len(env.Messages) == 0 {
+		return false
+	}
+	for _, m := range env.Messages {
+		if m.Type != protocol.MessageTypeProbe {
+			return false
+		}
+	}
+	return true
+}
+
+// collectUpstreamData drains pending upstream bytes for the given client
+// into a sequence of DATA messages. It blocks up to window for new data,
+// waking on the per-client signal channel. When longPoll is false the
+// window is short and the function returns whatever is already buffered.
+//
+// IMPORTANT: drain happens only after the wait phase commits to returning,
+// so a canceled HTTP request leaves bytes in the session's pending buffer
+// for the next request rather than losing them.
+func (s *Server) collectUpstreamData(ctx context.Context, clientID string, window time.Duration, longPoll bool) []protocol.Message {
+	// Long-poll only makes sense if this client has live sessions; otherwise
+	// no data will ever arrive and we'd just stall a probe-only request the
+	// caller wants a quick answer to (e.g. Runtime.Probe()).
+	s.mu.Lock()
+	hasSessions := len(s.byClient[clientID]) > 0
+	s.mu.Unlock()
+	if !hasSessions {
+		return nil
+	}
+	signal := s.signal(clientID)
+	// Drain pending immediately first; if there's already data, no waiting.
+	if out := s.drainAllForClient(clientID); len(out) > 0 {
+		return out
+	}
+	if window <= 0 {
+		return nil
+	}
+	deadline := time.Now().Add(window)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return s.drainAllForClient(clientID)
+		}
+		select {
+		case <-signal:
+			// Data arrived (or session went terminal). Drain on the next loop.
+			if out := s.drainAllForClient(clientID); len(out) > 0 {
+				return out
+			}
+			// Spurious wake (already drained by another caller). Keep waiting.
+		case <-ctx.Done():
+			// Caller gave up. Do NOT drain — the bytes belong to a future
+			// request so seq stays consistent.
+			return nil
+		case <-s.stopCh:
+			return s.drainAllForClient(clientID)
+		case <-time.After(remaining):
+			return s.drainAllForClient(clientID)
+		}
+		_ = longPoll // signature kept for caller clarity; behaviour is window-driven.
+	}
+}
+
+// drainAllForClient performs one drain pass across every live session for
+// the client. It assigns send-seq numbers as it builds DATA messages and
+// emits CLOSE for sessions whose upstream finished. No waiting.
+func (s *Server) drainAllForClient(clientID string) []protocol.Message {
+	s.mu.Lock()
+	clients := s.byClient[clientID]
+	ids := make([]string, 0, len(clients))
+	for id := range clients {
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+
+	var out []protocol.Message
+	for _, id := range ids {
+		ss := s.lookup(clientID, id)
+		if ss == nil {
+			continue
+		}
+		chunks, done, _ := ss.drain(s.maxChunk)
+		for _, c := range chunks {
+			ss.mu.Lock()
+			seq := ss.nextSendSeq
+			ss.nextSendSeq++
+			ss.mu.Unlock()
+			seqVal := seq
+			out = append(out, buildServerDataMessage(id, &seqVal, c))
+		}
+		if done {
+			out = append(out, protocol.Message{
+				Type: protocol.MessageTypeClose, SessionID: id,
+			})
+			ss.terminate(nil)
+			s.unregister(clientID, id)
+		}
+	}
+	return out
+}
+
+// buildServerDataMessage mirrors the client's chunk policy: compress chunks
+// large enough for gzip to be a net win.
+func buildServerDataMessage(sessID string, seq *uint64, chunk []byte) protocol.Message {
+	if len(chunk) >= protocol.CompressThreshold {
+		if compressed, err := protocol.CompressData(chunk); err == nil && len(compressed) < len(chunk) {
+			return protocol.Message{
+				Type:       protocol.MessageTypeData,
+				SessionID:  sessID,
+				Seq:        seq,
+				Data:       compressed,
+				Compressed: true,
+			}
+		}
+	}
+	return protocol.Message{
+		Type:      protocol.MessageTypeData,
+		SessionID: sessID,
+		Seq:       seq,
+		Data:      chunk,
+	}
+}

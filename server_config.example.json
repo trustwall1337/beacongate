@@ -1,0 +1,16 @@
+{
+  "server_id": "server-west-1",
+  "listen_addr": ":8080",
+  "tunnel_path": "/tunnel",
+  "health_path": "/healthz",
+  "key": "REPLACE_ME_WITH_BASE64_32_BYTE_KEY==",
+  "policy": {
+    "baseline_enabled": true,
+    "store_path": "/var/lib/beacongate/policy.json"
+  },
+  "admin": {
+    "enabled": true,
+    "listen_addr": "127.0.0.1:9090",
+    "token": ""
+  }
+}

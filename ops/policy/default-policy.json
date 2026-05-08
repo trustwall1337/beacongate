@@ -1,0 +1,47 @@
+[
+  {
+    "id": "baseline.torrent.tracker.opentrackr",
+    "name": "Block opentrackr.org tracker",
+    "category": "torrent",
+    "source": "baseline",
+    "enabled": true,
+    "action": "block",
+    "match": "wildcard-host",
+    "pattern": "*.opentrackr.org",
+    "reason": "torrent tracker (baseline)"
+  },
+  {
+    "id": "baseline.torrent.tracker.openbittorrent",
+    "name": "Block openbittorrent.com tracker",
+    "category": "torrent",
+    "source": "baseline",
+    "enabled": true,
+    "action": "block",
+    "match": "wildcard-host",
+    "pattern": "*.openbittorrent.com",
+    "reason": "torrent tracker (baseline)"
+  },
+  {
+    "id": "baseline.torrent.tracker.thepiratebay",
+    "name": "Block thepiratebay variants",
+    "category": "torrent",
+    "source": "baseline",
+    "enabled": true,
+    "action": "block",
+    "match": "wildcard-host",
+    "pattern": "*.thepiratebay.org",
+    "reason": "torrent index (baseline)"
+  },
+  {
+    "id": "baseline.torrent.port.bittorrent",
+    "name": "Block bittorrent default port",
+    "category": "torrent",
+    "source": "baseline",
+    "enabled": true,
+    "action": "block",
+    "match": "cidr",
+    "pattern": "0.0.0.0/0",
+    "port": 6881,
+    "reason": "common bittorrent port (baseline)"
+  }
+]

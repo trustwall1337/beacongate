@@ -1,0 +1,14 @@
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+RUN go mod download || true
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/beacongate-server ./cmd/beacongate-server
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates && adduser -D -H -u 10001 beacongate
+COPY --from=build /out/beacongate-server /usr/local/bin/beacongate-server
+USER beacongate
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/beacongate-server"]
+CMD ["-config", "/etc/beacongate/server_config.json"]

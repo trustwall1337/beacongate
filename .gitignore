@@ -1,0 +1,8 @@
+bin/
+dist/
+.DS_Store
+coverage.out
+
+# Personal/internal planning kept out of the public repo.
+docs/planning/
+docs/.archive/

@@ -1,0 +1,36 @@
+# Ignore everything by default; whitelist just what the build needs.
+*
+
+# Source the build needs (Go subtree only — desktop/, mobile/, etc. have
+# their own build contexts).
+!go.mod
+!go.sum
+!cmd/
+!engine/
+!client/
+!server/
+
+# Allow ops files referenced by Dockerfile/compose.
+!ops/policy/
+
+# Configs and docs are not part of the build.
+*.example.json
+docs/
+ops/systemd/
+*.md
+*.yml
+*.yaml
+
+# Local artifacts.
+bin/
+dist/
+coverage.*
+.DS_Store
+.vscode/
+.idea/
+.env
+.env.*
+
+# VCS metadata.
+.git/
+.github/
