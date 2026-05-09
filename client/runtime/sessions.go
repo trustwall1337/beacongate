@@ -17,9 +17,15 @@ const (
 	// defaultIdleHold is how long a probe-only request is allowed to hang at
 	// the server. The server returns early as soon as it has data to ship,
 	// so this is an upper bound on quiet-period wakeups, not a typical wait.
-	// 25s is below common HTTP intermediary idle timeouts (Cloudflare 100s,
-	// nginx/Caddy 60s) so no proxy will sever the connection.
-	defaultIdleHold = 25 * time.Second
+	// 8s gives a tight inbound-channel cycle: when no data is queued, the
+	// long-poll completes in 8s and the client immediately starts the next
+	// poll, keeping the inbound path "fresh" with low pickup latency for
+	// any newly-arriving response data. Trade-off: more Apps Script
+	// invocations per minute under idle (~3× vs 25s), but well within the
+	// 20K/day per-account quota for typical end-user load. Still below
+	// common HTTP intermediary idle timeouts (Cloudflare 100s, nginx/Caddy
+	// 60s) so no proxy will sever the connection.
+	defaultIdleHold = 8 * time.Second
 	// defaultActiveTimeout caps a request that carries real outbound work.
 	// It needs to be larger than defaultIdleHold so a server-side long-poll
 	// has room to complete naturally.
