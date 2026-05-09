@@ -100,6 +100,92 @@ func TestDecodeRejectsUnknownVersion(t *testing.T) {
 	}
 }
 
+// TestEncodeLinkStripsDefaults verifies that a ClientConfig containing
+// only-default values for elidable fields produces a noticeably
+// shorter link than the same config marshaled directly. This is the
+// QR-density win — the encoded link must drop server.url, the
+// 216.239.38.120:443 google_host, the empty account label, the
+// 127.0.0.1:1080 listen_addr, and the empty socks block.
+func TestEncodeLinkStripsDefaults(t *testing.T) {
+	cfg := mustValidConfig(t)
+	cfg.Transport.Options["google_host"] = "216.239.38.120:443" // matches default
+	link, err := EncodeLink(cfg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	// Decode the base64 payload back to JSON to inspect what was emitted.
+	const prefix = "bg://config?d="
+	if !strings.Contains(link, prefix) {
+		t.Fatalf("link missing %q: %s", prefix, link)
+	}
+	idx := strings.Index(link, "d=")
+	if idx < 0 {
+		t.Fatalf("link missing d= param: %s", link)
+	}
+	dParam := link[idx+2:]
+	if amp := strings.Index(dParam, "&"); amp >= 0 {
+		dParam = dParam[:amp]
+	}
+	body, err := base64.RawURLEncoding.DecodeString(dParam)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	js := string(body)
+	for _, banned := range []string{
+		`"google_host":"216.239.38.120:443"`,
+		`"url":""`,
+		`"account":""`,
+		`"listen_addr":"127.0.0.1:1080"`,
+		`"socks":{}`,
+	} {
+		if strings.Contains(js, banned) {
+			t.Errorf("encoded JSON should NOT contain default-valued %q; got %s", banned, js)
+		}
+	}
+	// The required fields must still be present.
+	for _, required := range []string{`"client_id"`, `"key"`, `"transport"`, `"type"`} {
+		if !strings.Contains(js, required) {
+			t.Errorf("encoded JSON missing required field %q: %s", required, js)
+		}
+	}
+}
+
+// TestDecodeLinkFillsDefaultsForStrippedFields confirms a link
+// produced by the new (stripping) encoder decodes back into a
+// validate-able ClientConfig: listen_addr gets restored, the
+// transport's own defaults handle google_host downstream.
+func TestDecodeLinkFillsDefaultsForStrippedFields(t *testing.T) {
+	cfg := mustValidConfig(t)
+	link, err := EncodeLink(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeLink(link)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ListenAddr != "127.0.0.1:1080" {
+		t.Errorf("listen_addr default not restored: got %q", got.ListenAddr)
+	}
+}
+
+// TestDecodeLinkBackwardsCompatibleWithFullLink asserts a
+// hand-constructed "full" (pre-stripping) link — what an older client
+// would have produced — still decodes cleanly with the new decoder.
+// fillLinkDefaults must be a no-op when the field is already populated.
+func TestDecodeLinkBackwardsCompatibleWithFullLink(t *testing.T) {
+	full := `{"client_id":"old-style","listen_addr":"127.0.0.1:1080","server":{"url":"","key":"` + EncodeKey(make([]byte, 32)) + `"},"transport":{"type":"appsscript","options":{"google_host":"216.239.38.120:443","script_keys":[{"id":"DEPID","account":""}],"sni":"www.google.com"}},"socks":{}}`
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(full))
+	link := "bg://config?v=1&d=" + encoded
+	got, err := DecodeLink(link)
+	if err != nil {
+		t.Fatalf("decode old-style link: %v", err)
+	}
+	if got.ListenAddr != "127.0.0.1:1080" {
+		t.Errorf("ListenAddr round-trip: got %q", got.ListenAddr)
+	}
+}
+
 func TestLinkSafeSummaryHidesKey(t *testing.T) {
 	cfg := mustValidConfig(t)
 	summary := LinkSafeSummary(cfg)
