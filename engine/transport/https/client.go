@@ -141,7 +141,7 @@ func (c *Client) Roundtrip(ctx context.Context, batch []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", transport.ErrUnreachable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
 		return nil, fmt.Errorf("%w: read body: %v", transport.ErrUnreachable, readErr)
@@ -180,7 +180,7 @@ func (c *Client) Diagnose(ctx context.Context) (transport.Diagnostics, error) {
 	if err != nil {
 		return transport.Diagnostics{Healthy: false, Detail: err.Error()}, nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	latency := time.Since(start)
 	healthy := resp.StatusCode < 400
 	return transport.Diagnostics{

@@ -33,7 +33,12 @@ func TestLintNoQuotaPollingOnRequestPath(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	pkg, err := parser.ParseDir(fset, ".", nil, parser.ParseComments)
+	// parser.ParseDir is marked deprecated in Go 1.25 because it
+	// doesn't honor build tags. We don't have build-tagged files in
+	// this package, so the simpler API is fine and pulling in
+	// golang.org/x/tools/go/packages just for a lint test is
+	// overkill.
+	pkg, err := parser.ParseDir(fset, ".", nil, parser.ParseComments) //nolint:staticcheck // SA1019 — see comment above
 	if err != nil {
 		t.Fatalf("parse package: %v", err)
 	}
@@ -82,7 +87,12 @@ func TestLintNoQuotaPollingOnRequestPath(t *testing.T) {
 func TestLintTLSMinVersionIsTLS13(t *testing.T) {
 	const wantMinVersion = "VersionTLS13"
 	fset := token.NewFileSet()
-	pkg, err := parser.ParseDir(fset, ".", nil, parser.ParseComments)
+	// parser.ParseDir is marked deprecated in Go 1.25 because it
+	// doesn't honor build tags. We don't have build-tagged files in
+	// this package, so the simpler API is fine and pulling in
+	// golang.org/x/tools/go/packages just for a lint test is
+	// overkill.
+	pkg, err := parser.ParseDir(fset, ".", nil, parser.ParseComments) //nolint:staticcheck // SA1019 — see comment above
 	if err != nil {
 		t.Fatalf("parse package: %v", err)
 	}

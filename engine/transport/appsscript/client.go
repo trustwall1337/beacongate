@@ -238,7 +238,7 @@ func (c *Client) attempt(ctx context.Context, idx int, encodedBody string) ([]by
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", transport.ErrUnreachable, err)
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, maxResponseBody))
 	// Every HTTP response we read consumed one Apps Script invocation,

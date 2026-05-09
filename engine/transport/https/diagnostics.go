@@ -29,7 +29,7 @@ func QuickDiagnose(ctx context.Context, url string, timeout time.Duration) (tran
 	if err != nil {
 		return transport.Diagnostics{Healthy: false, Detail: err.Error()}, nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return transport.Diagnostics{
 		Healthy: resp.StatusCode < 400,
 		Latency: time.Since(start),

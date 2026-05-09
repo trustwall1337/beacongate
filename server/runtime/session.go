@@ -61,12 +61,6 @@ func (s *serverSession) writeUpstream(b []byte) error {
 	return err
 }
 
-func (s *serverSession) markActivity() {
-	s.mu.Lock()
-	s.lastActivity = time.Now()
-	s.mu.Unlock()
-}
-
 func (s *serverSession) drain(maxChunk int) ([][]byte, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -102,7 +96,7 @@ func (s *serverSession) terminate(err error) {
 	conn := s.conn
 	s.mu.Unlock()
 	if conn != nil {
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 

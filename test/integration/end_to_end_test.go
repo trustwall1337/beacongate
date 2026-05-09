@@ -283,17 +283,10 @@ func TestEndToEndIdempotentRetryThroughFullPipeline(t *testing.T) {
 	h := setup(t)
 	defer h.cleanup()
 
-	// Build a signed wire packet by going through the client runtime's
-	// Exchange path with a controlled in-memory transport. The transport
-	// captures both the wire bytes sent and the response bytes received,
-	// then forwards through to the real server.
-	type captured struct {
-		wireOut, wireIn []byte
-	}
-	cap := &captured{}
-
-	// We can't easily intercept inside h.clientRT, so build the wire
-	// bytes ourselves using the real sealer (matches h.serverObj's key).
+	// Build the wire bytes ourselves using the real sealer (matches
+	// h.serverObj's key). We can't easily intercept inside h.clientRT,
+	// so the test goes around the runtime to produce a known-shape
+	// envelope and POSTs it directly.
 	keyBytes, err := h.clientCfg.ServerKeyBytes()
 	if err != nil {
 		t.Fatal(err)
@@ -309,30 +302,30 @@ func TestEndToEndIdempotentRetryThroughFullPipeline(t *testing.T) {
 		Messages:    []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: "idempo"}},
 	}
 	plain, _ := protocol.EncodeEnvelope(env)
-	cap.wireOut, err = sealer.Seal(env.ClientID, plain)
+	wireOut, err := sealer.Seal(env.ClientID, plain)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// First POST: server processes, caches the response.
-	resp1, err := http.Post(h.tunnelURL, "application/octet-stream", bytes.NewReader(cap.wireOut))
+	resp1, err := http.Post(h.tunnelURL, "application/octet-stream", bytes.NewReader(wireOut)) //nolint:noctx // tests
 	if err != nil {
 		t.Fatal(err)
 	}
 	body1, _ := io.ReadAll(resp1.Body)
-	resp1.Body.Close()
+	_ = resp1.Body.Close()
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("first POST status %d", resp1.StatusCode)
 	}
 
 	// Idempotent retry: same wire bytes within the response-cache TTL
 	// → cached response, byte-identical.
-	resp2, err := http.Post(h.tunnelURL, "application/octet-stream", bytes.NewReader(cap.wireOut))
+	resp2, err := http.Post(h.tunnelURL, "application/octet-stream", bytes.NewReader(wireOut)) //nolint:noctx // tests
 	if err != nil {
 		t.Fatal(err)
 	}
 	body2, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("retry POST status %d body=%s", resp2.StatusCode, body2)
 	}
@@ -357,12 +350,6 @@ func TestEndToEndAADBindingRejectsCrossClientReplay(t *testing.T) {
 	}
 	// "client-it" is the integration test's client_id (12 bytes); pick a
 	// same-length swap so the wire layout's length field stays valid.
-	const sameLength = "client-xy"
-	if len(h.clientCfg.ClientID) != len(sameLength)+3 {
-		// "client-it" is 9 bytes, sameLength="client-xy" is also 9.
-		// The check above is just defensive; if either renames, the
-		// test maintainer needs to pick a same-length swap.
-	}
 	swap := "client-yz" // 9 bytes, matches "client-it" exactly
 	if len(swap) != len(h.clientCfg.ClientID) {
 		t.Fatalf("test setup: swap target %q must be same length as %q", swap, h.clientCfg.ClientID)

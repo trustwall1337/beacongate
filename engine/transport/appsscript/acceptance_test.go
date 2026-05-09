@@ -54,11 +54,13 @@ func TestA7_TCPDestinationIsConfiguredGoogleIP(t *testing.T) {
 	// sentinel, not whatever URL the caller gave.
 	transport := &http.Transport{DialContext: dialContext}
 	httpClient := &http.Client{Transport: transport, Timeout: 200 * time.Millisecond}
-	req, err := http.NewRequest(http.MethodGet, "https://script.google.com/macros/s/ID/exec", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://script.google.com/macros/s/ID/exec", http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = httpClient.Do(req) // expected to fail; we want the dial side-effect
+	if resp, err := httpClient.Do(req); err == nil {
+		_ = resp.Body.Close() // expected to fail; if it didn't, drain the body
+	}
 
 	if len(dialedAddrs) == 0 {
 		t.Fatalf("expected at least one dial attempt; got none")

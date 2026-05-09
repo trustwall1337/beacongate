@@ -175,9 +175,9 @@ func main() {
 	serverLog.Info("shutting_down")
 	shutCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer scancel()
-	httpSrv.Shutdown(shutCtx)
+	_ = httpSrv.Shutdown(shutCtx)
 	if adminSrv != nil {
-		adminSrv.Shutdown(shutCtx)
+		_ = adminSrv.Shutdown(shutCtx)
 	}
-	srv.Close()
+	_ = srv.Close()
 }

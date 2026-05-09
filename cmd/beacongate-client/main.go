@@ -72,7 +72,7 @@ func main() {
 		log.Fatalf("runtime: %v", err)
 	}
 	rt.SetLogger(clientLogger)
-	defer rt.Close()
+	defer func() { _ = rt.Close() }()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -87,7 +87,7 @@ func main() {
 
 	pump := clientruntime.NewPump(rt)
 	pump.Start()
-	defer pump.Close()
+	defer func() { _ = pump.Close() }()
 
 	srv := socks.NewServer(pump)
 	if cfg.Socks.Username != "" {
@@ -112,7 +112,7 @@ func main() {
 
 	<-ctx.Done()
 	clientLogger.Info("shutting_down")
-	srv.Close()
+	_ = srv.Close()
 }
 
 func buildTransport(cfg *config.ClientConfig) (transport.ClientTransport, error) {

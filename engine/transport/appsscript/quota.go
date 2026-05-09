@@ -167,7 +167,7 @@ func (c *Client) pollOneDeployment(ctx context.Context, idx int, url string) {
 		// bump the daily counter. Next interval will retry.
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, quotaPollMaxBody))
 	// doGet, like doPost, consumes one Apps Script invocation. Bump

@@ -38,13 +38,35 @@ linters:
       enabled-tags:
         - diagnostic
         - performance
-        - style
+      # Style checks intentionally NOT enabled. The bodies of the
+      # checks below were judged net-negative for this codebase:
+      # - hugeParam / rangeValCopy: protocol message structs are
+      #   passed by value across many call sites by design (the
+      #   immutability discipline matters more than the copy cost
+      #   at our message rates).
+      # - unnamedResult / paramTypeCombine / deferInLoop /
+      #   ifElseChain: pure style; project chose explicit forms.
+      # - httpNoBody: `nil` body is idiomatic Go and stdlib's
+      #   own examples use it.
+      # - builtinShadow: `cap` is shadowed deliberately in a few
+      #   spots where the local meaning is "capacity" not the
+      #   builtin.
       disabled-checks:
-        - ifElseChain   # noisy on intentional flat conditionals
+        - hugeParam
+        - rangeValCopy
+        - unnamedResult
+        - paramTypeCombine
+        - deferInLoop
+        - ifElseChain
+        - httpNoBody
+        - builtinShadow
     gosec:
       excludes:
         - G104  # unhandled errors — errcheck already covers this with more nuance
         - G404  # not all rand uses need crypto/rand; we use crypto/rand where it matters
+        - G114  # http.ListenAndServe without timeouts: the loopback control API uses it deliberately (loopback-only, short-lived)
+        - G115  # integer overflow conversions: every site is bounded by the wire format's documented limits
+        - G304  # file inclusion via variable: every read is operator-controlled config / cert path
   exclusions:
     paths:
       - docs

@@ -68,16 +68,16 @@ func parseCommonFlags(name string) (*flag.FlagSet, *string, *string) {
 
 func listRules() {
 	fs, addr, token := parseCommonFlags("list-rules")
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:])
 	body := mustRequest(http.MethodGet, *addr+"/api/policy/rules", *token, nil)
-	io.Copy(os.Stdout, bytes.NewReader(body))
+	_, _ = io.Copy(os.Stdout, bytes.NewReader(body))
 	fmt.Println()
 }
 
 func putRule() {
 	fs, addr, token := parseCommonFlags("put-rule")
 	file := fs.String("file", "", "JSON file with rule body")
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:])
 	if *file == "" {
 		die("--file is required")
 	}
@@ -86,14 +86,14 @@ func putRule() {
 		die("read: %v", err)
 	}
 	body := mustRequest(http.MethodPost, *addr+"/api/policy/rules", *token, data)
-	io.Copy(os.Stdout, bytes.NewReader(body))
+	_, _ = io.Copy(os.Stdout, bytes.NewReader(body))
 	fmt.Println()
 }
 
 func deleteRule() {
 	fs, addr, token := parseCommonFlags("delete-rule")
 	id := fs.String("id", "", "rule id")
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:])
 	if *id == "" {
 		die("--id is required")
 	}
@@ -103,9 +103,9 @@ func deleteRule() {
 
 func serverStatus() {
 	fs, addr, token := parseCommonFlags("status")
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:])
 	body := mustRequest(http.MethodGet, *addr+"/api/status", *token, nil)
-	io.Copy(os.Stdout, bytes.NewReader(body))
+	_, _ = io.Copy(os.Stdout, bytes.NewReader(body))
 	fmt.Println()
 }
 
@@ -128,7 +128,7 @@ func mustRequest(method, url, token string, body []byte) []byte {
 	if err != nil {
 		die("call: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
 		die("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))

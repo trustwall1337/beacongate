@@ -87,7 +87,7 @@ func (s *Server) Serve(l net.Listener) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		l.Close()
+		_ = l.Close()
 		return errors.New("socks: server closed")
 	}
 	s.listener = l
@@ -128,9 +128,9 @@ func (s *Server) Addr() net.Addr {
 }
 
 func (s *Server) handle(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err == nil {
-		defer conn.SetDeadline(time.Time{})
+		defer func() { _ = conn.SetDeadline(time.Time{}) }()
 	}
 	s.mu.Lock()
 	auth := s.auth
@@ -144,25 +144,25 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	switch cmd {
 	case cmdBind, cmdUDPAssociate:
-		writeReply(conn, repCmdNotSupport)
+		_ = writeReply(conn, repCmdNotSupport)
 		return
 	case cmdConnect:
 		// allowed
 	default:
-		writeReply(conn, repCmdNotSupport)
+		_ = writeReply(conn, repCmdNotSupport)
 		return
 	}
-	conn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 
 	target := protocol.Target{Network: "tcp", Host: addr, Port: port}
 	sess, err := s.pump.Dial(target)
 	if err != nil {
 		s.pump.Log().Warn("socks.dial_failed",
 			"target", FormatHostPort(addr, port), "error", err.Error())
-		writeReply(conn, repGeneralFailure)
+		_ = writeReply(conn, repGeneralFailure)
 		return
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 	if err := writeReply(conn, repSuccess); err != nil {
 		return
 	}
@@ -198,7 +198,7 @@ func negotiateAuth(conn net.Conn, auth AuthConfig) error {
 		}
 	}
 	if !offered {
-		conn.Write([]byte{socksVersion, authNoAccept})
+		_, _ = conn.Write([]byte{socksVersion, authNoAccept})
 		return errors.New("socks: no acceptable auth method")
 	}
 	if _, err := conn.Write([]byte{socksVersion, want}); err != nil {
@@ -238,7 +238,7 @@ func verifyUserPass(conn net.Conn, auth AuthConfig) error {
 	if !ok {
 		status = 0x01
 	}
-	conn.Write([]byte{0x01, status})
+	_, _ = conn.Write([]byte{0x01, status})
 	if !ok {
 		return errors.New("socks: bad credentials")
 	}
@@ -318,15 +318,15 @@ func bridge(conn net.Conn, sess *runtime.ClientSession) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		io.Copy(sess, conn)
-		sess.Close()
+		_, _ = io.Copy(sess, conn)
+		_ = sess.Close()
 		cancel()
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(conn, sess)
+		_, _ = io.Copy(conn, sess)
 		if tcp, ok := conn.(*net.TCPConn); ok {
-			tcp.CloseWrite()
+			_ = tcp.CloseWrite()
 		}
 		cancel()
 	}()
@@ -334,8 +334,8 @@ func bridge(conn net.Conn, sess *runtime.ClientSession) {
 	// ends so the *other* io.Copy doesn't block forever waiting on a half
 	// that will never produce more bytes.
 	<-ctx.Done()
-	conn.Close()
-	sess.Close()
+	_ = conn.Close()
+	_ = sess.Close()
 	wg.Wait()
 }
 

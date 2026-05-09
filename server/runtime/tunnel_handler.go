@@ -15,17 +15,11 @@ import (
 	"github.com/trustwall1337/beacongate/engine/replay"
 )
 
-const (
-	tunnelMaxBody = 4 * 1024 * 1024
-
-	// timestampSkewMax is the absolute clock-skew tolerance for the
-	// inner AEAD-bound timestamp (plan B1). Envelopes outside this
-	// window are rejected as stale (likely replays past the dedup
-	// cap, or a misconfigured client clock). 5 minutes matches the
-	// plan; loosen only if the deployment's NTP discipline is
-	// known-bad.
-	timestampSkewMax = 5 * time.Minute
-)
+// tunnelMaxBody bounds the inbound batch size we'll read before
+// rejecting. The replay store's SkewMax (engine/replay) owns the
+// timestamp-window tolerance; nothing else in the handler caps the
+// body.
+const tunnelMaxBody = 4 * 1024 * 1024
 
 func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

@@ -100,7 +100,7 @@ func (c *Client) probeOne(ctx context.Context, idx int, url string) (r struct {
 		r.detail = err.Error()
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	r.latency = time.Since(start)
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, diagnoseMaxBody))
 	c.bumpDailyCount(idx) // doGet still consumes one quota unit

@@ -197,9 +197,8 @@ func (s *Store) shardFor(clientID string) *clientShard {
 // --- per-client shard ---
 
 type ringEntry struct {
-	replayID      [16]byte
-	addedAt       time.Time
-	responseBytes int // 0 if no response cached
+	replayID [16]byte
+	addedAt  time.Time
 }
 
 type responseEntry struct {

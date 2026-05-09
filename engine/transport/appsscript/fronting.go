@@ -85,23 +85,6 @@ func (p *httpClientPool) pick() *http.Client {
 	return p.clients[idx]
 }
 
-// pickAt returns the client at a specific index; used so a retry can
-// stay on the same SNI as the first attempt (separate connection pool,
-// so a transient h2 issue on one SNI doesn't poison the retry).
-func (p *httpClientPool) pickAt(idx int) *http.Client {
-	if idx < 0 || idx >= len(p.clients) {
-		return nil
-	}
-	return p.clients[idx]
-}
-
-// hostsList returns a defensive copy of the SNI rotation order.
-func (p *httpClientPool) hostsList() []string {
-	out := make([]string, len(p.hosts))
-	copy(out, p.hosts)
-	return out
-}
-
 // newFrontedClient builds a single *http.Client that dials googleIP and
 // presents sniHost in the TLS ClientHello. The HTTP Host header on each
 // request is left to Go's stdlib (= URL.Host), which for an Apps Script
@@ -189,7 +172,7 @@ func prewarmFrontedClients(googleIP string, sniHosts []string, caches map[string
 			if err != nil {
 				return
 			}
-			defer rawConn.Close()
+			defer func() { _ = rawConn.Close() }()
 			tlsConn := tls.Client(rawConn, &tls.Config{
 				ServerName:         sniHost,
 				MinVersion:         tls.VersionTLS13,
