@@ -134,6 +134,10 @@ func main() {
 	}
 
 	pump := clientruntime.NewPump(rt)
+	if cfg.CoalesceStepMs > 0 {
+		pump.SetCoalesceWindow(time.Duration(cfg.CoalesceStepMs) * time.Millisecond)
+		clientLogger.Info("coalesce.enabled", "window_ms", cfg.CoalesceStepMs)
+	}
 	pump.Start()
 	defer func() { _ = pump.Close() }()
 

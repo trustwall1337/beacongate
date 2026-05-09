@@ -54,6 +54,21 @@ type Pump struct {
 
 	errMu   sync.Mutex
 	lastErr error
+
+	// Coalescing (Workstream G): when coalesceWindow > 0, an enqueue
+	// arms a timer that delays the wake-flush by coalesceWindow.
+	// Subsequent enqueues within the window reset the timer, building
+	// up a larger batch — fewer HTTP requests, real Apps Script quota
+	// savings for interactive workloads (SSH typing, REST polling).
+	//
+	// safetyCap = 5 × coalesceWindow caps how long the timer can be
+	// repeatedly extended; a steady stream of fast-arriving frames
+	// must still flush within safetyCap so user-visible latency stays
+	// bounded.
+	coalesceMu        sync.Mutex
+	coalesceWindow    time.Duration
+	coalesceTimer     *time.Timer
+	coalesceFirstKick time.Time
 }
 
 func NewPump(rt *Runtime) *Pump {
@@ -66,6 +81,24 @@ func NewPump(rt *Runtime) *Pump {
 		stop:     make(chan struct{}),
 		stopped:  make(chan struct{}),
 	}
+}
+
+// SetCoalesceWindow enables adaptive uplink coalescing. When d > 0,
+// enqueues defer the wake-flush by d, building up larger batches.
+// d == 0 disables coalescing (immediate flush, current behavior).
+// Caller is responsible for clamping d to a sane range; the loader
+// rejects values outside [0, 200ms] at config-load time.
+func (p *Pump) SetCoalesceWindow(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	p.coalesceMu.Lock()
+	p.coalesceWindow = d
+	// If a timer was running with the old window, leave it alone —
+	// it'll fire on the old schedule, then subsequent enqueues use
+	// the new window. Keeps SetCoalesceWindow lock-free at the cost
+	// of one stale-timer tick during reconfiguration, which is fine.
+	p.coalesceMu.Unlock()
 }
 
 // SetIdleHold overrides the long-poll hold time. Tests use a tight value to
@@ -165,6 +198,60 @@ func (p *Pump) enqueue(msgs ...protocol.Message) {
 	p.mu.Lock()
 	p.outbox = append(p.outbox, msgs...)
 	p.mu.Unlock()
+	p.scheduleFlush()
+}
+
+// scheduleFlush wakes the pump loop, but adaptively: when
+// coalesceWindow is 0, fires immediately (preserves current
+// behavior). When > 0, arms (or resets) a timer so multiple
+// enqueues within the window collapse into one HTTP request —
+// real Apps Script quota economy for interactive bursts.
+//
+// Safety cap: the timer can be reset for up to 5×coalesceWindow
+// from the first kick of a coalesce period. Past that, the next
+// reset call fires the flush directly so latency stays bounded.
+func (p *Pump) scheduleFlush() {
+	p.coalesceMu.Lock()
+	window := p.coalesceWindow
+	if window <= 0 {
+		p.coalesceMu.Unlock()
+		p.signalFlush()
+		return
+	}
+	safetyCap := 5 * window
+	if p.coalesceTimer == nil {
+		// Open a new coalesce period.
+		p.coalesceFirstKick = time.Now()
+		p.coalesceTimer = time.AfterFunc(window, p.coalesceFire)
+		p.coalesceMu.Unlock()
+		return
+	}
+	// Existing period — reset the timer adaptively, but not past
+	// the safety cap.
+	elapsed := time.Since(p.coalesceFirstKick)
+	if elapsed >= safetyCap {
+		// Cap exceeded: fire now, end period.
+		_ = p.coalesceTimer.Stop()
+		p.coalesceTimer = nil
+		p.coalesceMu.Unlock()
+		p.signalFlush()
+		return
+	}
+	remaining := safetyCap - elapsed
+	next := window
+	if next > remaining {
+		next = remaining
+	}
+	_ = p.coalesceTimer.Reset(next)
+	p.coalesceMu.Unlock()
+}
+
+// coalesceFire is the timer callback that ends a coalesce period and
+// wakes the pump loop.
+func (p *Pump) coalesceFire() {
+	p.coalesceMu.Lock()
+	p.coalesceTimer = nil
+	p.coalesceMu.Unlock()
 	p.signalFlush()
 }
 

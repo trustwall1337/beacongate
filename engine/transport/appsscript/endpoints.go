@@ -56,12 +56,41 @@ const (
 )
 
 // endpointPool owns the slice of relayEndpoints plus the round-robin
-// cursor. Selection is round-robin with skip-on-blacklist, so a few bad
-// endpoints don't starve the live ones.
+// cursor.
+//
+// **Bucket awareness (v1.1.0):** endpoints sharing the same `account`
+// label form a "bucket". Selection rotates BUCKETS first — pick from
+// the next bucket before re-picking from the same one — so quota draw
+// is spread evenly across the operator's Google accounts. Within a
+// bucket, deployments round-robin and skip-on-blacklist as before.
+//
+// Same-bucket failover: when an attempt against deployment X in
+// bucket A fails, pickFallback prefers a different deployment in
+// bucket A (same quota cap, same per-account rate limit) before
+// crossing into bucket B. Cross-bucket fallback only fires when
+// bucket A has no other live deployment.
+//
+// What v1.1.0 does NOT do: spawn N parallel poll workers per bucket
+// (Goose's 4-workers-per-account model). The carrier above this pool
+// remains single-Roundtrip; bucket-aware selection improves quota
+// distribution without changing the in-flight request count. True
+// per-bucket worker parallelism is v1.2 follow-up work.
 type endpointPool struct {
-	mu   sync.Mutex
-	eps  []relayEndpoint
-	next int
+	mu  sync.Mutex
+	eps []relayEndpoint
+
+	// buckets is a list of endpoint-index slices, one slice per
+	// distinct `account` label. Endpoints with empty account collapse
+	// into a single "<unlabeled>" bucket. Bucket order is stable
+	// across pool lifetime (insertion order from first occurrence of
+	// each account).
+	buckets [][]int
+
+	// nextBucket rotates buckets at the outer level.
+	nextBucket int
+	// nextInBucket tracks the per-bucket round-robin cursor; one entry
+	// per bucket, parallel to `buckets`.
+	nextInBucket []int
 }
 
 // newEndpointPool constructs the pool from the operator's script_keys
@@ -77,6 +106,9 @@ func newEndpointPool(scriptKeys, scriptAccounts []string) *endpointPool {
 // callers pass nil for scriptURLs.
 func newEndpointPoolWithURLs(scriptKeys, scriptAccounts, scriptURLs []string) *endpointPool {
 	eps := make([]relayEndpoint, len(scriptKeys))
+	// Group endpoints by account label, preserving insertion order.
+	bucketIdx := make(map[string]int)
+	var buckets [][]int
 	for i, key := range scriptKeys {
 		account := ""
 		if i < len(scriptAccounts) {
@@ -92,53 +124,126 @@ func newEndpointPoolWithURLs(scriptKeys, scriptAccounts, scriptURLs []string) *e
 			url:     url,
 			account: account,
 		}
+		bk := bucketKey(account)
+		bi, ok := bucketIdx[bk]
+		if !ok {
+			bi = len(buckets)
+			bucketIdx[bk] = bi
+			buckets = append(buckets, nil)
+		}
+		buckets[bi] = append(buckets[bi], i)
 	}
-	return &endpointPool{eps: eps}
+	return &endpointPool{
+		eps:          eps,
+		buckets:      buckets,
+		nextInBucket: make([]int, len(buckets)),
+	}
 }
 
-// pick returns the next live endpoint by index, skipping any whose
-// blacklist hasn't yet expired. Returns -1 if every endpoint is
-// blacklisted (caller should still retry with an arbitrary one rather
-// than hang the request — better an attempt than a stall).
+// bucketKey normalizes an account label for grouping. Empty/unlabeled
+// endpoints all collapse into the same anonymous bucket.
+func bucketKey(account string) string {
+	if account == "" {
+		return "<unlabeled>"
+	}
+	return account
+}
+
+// bucketOf returns the bucket index containing endpoint idx, or -1 if
+// idx is out of range. Caller must hold p.mu.
+func (p *endpointPool) bucketOfLocked(idx int) int {
+	for bi, b := range p.buckets {
+		for _, ei := range b {
+			if ei == idx {
+				return bi
+			}
+		}
+	}
+	return -1
+}
+
+// pick returns the next live endpoint by index, rotating buckets at
+// the outer level so quota draw spreads evenly across operator
+// Google accounts. Within a bucket, deployments round-robin and
+// skip-on-blacklist.
+//
+// Returns -1 if every endpoint in every bucket is blacklisted
+// (caller should still retry with an arbitrary one rather than hang
+// the request — better an attempt than a stall).
 //
 // Caller must hold no other locks; pick is short and grabs only mu.
 func (p *endpointPool) pick(now time.Time) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.eps) == 0 {
+	if len(p.eps) == 0 || len(p.buckets) == 0 {
 		return -1
 	}
-	// Try every endpoint at most once.
-	for i := 0; i < len(p.eps); i++ {
-		idx := (p.next + i) % len(p.eps)
-		ep := &p.eps[idx]
-		if now.Before(ep.blacklistedTill) {
+	// Try every bucket at most once, starting from nextBucket.
+	for b := 0; b < len(p.buckets); b++ {
+		bi := (p.nextBucket + b) % len(p.buckets)
+		bucket := p.buckets[bi]
+		if len(bucket) == 0 {
 			continue
 		}
-		p.next = (idx + 1) % len(p.eps)
-		return idx
+		// Within this bucket, try every endpoint at most once.
+		startIdx := p.nextInBucket[bi]
+		for j := 0; j < len(bucket); j++ {
+			pos := (startIdx + j) % len(bucket)
+			idx := bucket[pos]
+			if now.Before(p.eps[idx].blacklistedTill) {
+				continue
+			}
+			// Advance both cursors so the next pick rotates onward.
+			p.nextInBucket[bi] = (pos + 1) % len(bucket)
+			p.nextBucket = (bi + 1) % len(p.buckets)
+			return idx
+		}
 	}
-	// All blacklisted. Caller decides what to do.
+	// All endpoints in all buckets blacklisted.
 	return -1
 }
 
-// pickFallback returns the next endpoint after `excludeIdx` for failover
-// (Workstream A9 invariant #3 caps to one failover per batch). Returns
-// -1 if no other endpoint exists, or excludeIdx itself if there's only
-// one configured.
+// pickFallback returns an alternate endpoint after `excludeIdx` for
+// failover (Workstream A9 invariant #3 caps to one failover per
+// batch).
+//
+// **Bucket-aware:** prefers another endpoint in the SAME bucket as
+// excludeIdx (same Google account → same quota cap, same per-account
+// rate limits, so retrying in-bucket has the most chance of success).
+// Falls through to other buckets only when the primary's bucket has
+// no other live endpoint.
+//
+// Returns -1 if no other live endpoint exists fleet-wide.
 func (p *endpointPool) pickFallback(excludeIdx int, now time.Time) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.eps) <= 1 {
 		return -1
 	}
-	for i := 1; i < len(p.eps); i++ {
-		idx := (excludeIdx + i) % len(p.eps)
-		ep := &p.eps[idx]
-		if now.Before(ep.blacklistedTill) {
-			continue
+	// 1) Same-bucket fallback first.
+	if bi := p.bucketOfLocked(excludeIdx); bi >= 0 {
+		bucket := p.buckets[bi]
+		for _, idx := range bucket {
+			if idx == excludeIdx {
+				continue
+			}
+			if now.Before(p.eps[idx].blacklistedTill) {
+				continue
+			}
+			return idx
 		}
-		return idx
+	}
+	// 2) Cross-bucket fallback: try every other bucket in order.
+	for b := 0; b < len(p.buckets); b++ {
+		for _, idx := range p.buckets[b] {
+			if idx == excludeIdx {
+				continue
+			}
+			if now.Before(p.eps[idx].blacklistedTill) {
+				continue
+			}
+			return idx
+		}
 	}
 	return -1
 }

@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -137,6 +138,14 @@ func New(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("appsscript transport: ScriptURLs must be parallel to ScriptKeys (got %d urls, %d keys)", len(cfg.ScriptURLs), len(cfg.ScriptKeys))
 	}
 	pool := newEndpointPoolWithURLs(cfg.ScriptKeys, cfg.ScriptAccounts, cfg.ScriptURLs)
+	// Warn if multi-deployment but everything collapsed into the
+	// single anonymous bucket — operator almost always meant to label.
+	if len(cfg.ScriptKeys) >= 2 && len(pool.buckets) == 1 && pool.eps[0].account == "" {
+		// Use stderr directly (no logger plumbed into Config); this is
+		// loud enough that operators won't miss it during first run.
+		fmt.Fprintln(os.Stderr,
+			"appsscript: WARN — multiple deployments configured but no `account` labels set; quota and per-account concurrency will be treated as ONE Google account. If your deployments are under multiple accounts, label them in script_keys: [{\"id\":\"...\",\"account\":\"alpha\"}, ...]")
+	}
 
 	var clients *httpClientPool
 	if len(cfg.HTTPClients) > 0 {

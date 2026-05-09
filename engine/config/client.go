@@ -11,6 +11,23 @@ type ClientConfig struct {
 	Server     ClientServerConfig    `json:"server"`
 	Transport  ClientTransportConfig `json:"transport"`
 	Socks      ClientSocksConfig     `json:"socks,omitempty"`
+
+	// CoalesceStepMs enables adaptive uplink coalescing. When > 0, the
+	// pump's first TX kick waits this many milliseconds for additional
+	// outbound frames before posting a batch; each new frame resets the
+	// timer. Trades latency for fewer Apps Script calls (significant
+	// quota economy for SSH-style interactive bursts where each
+	// keystroke would otherwise be one POST).
+	//
+	// 0 (default) = off, every TX fires immediately.
+	// 20–40 = recommended starting range; 30ms is a sensible default
+	//         when enabling coalescing for the first time.
+	// Max 200 = hard cap; values above hurt perceived responsiveness.
+	//
+	// A safety-cap is derived as 5×CoalesceStepMs so a stream of
+	// frames spaced just under the window can't defer the flush
+	// indefinitely.
+	CoalesceStepMs int `json:"coalesce_step_ms,omitempty"`
 }
 
 // ClientSocksConfig optionally requires SOCKS5 username/password auth on
@@ -66,6 +83,9 @@ func (c *ClientConfig) Validate() error {
 	}
 	if c.ListenAddr == "" {
 		return fmt.Errorf("%w: listen_addr required", ErrInvalidConfig)
+	}
+	if c.CoalesceStepMs < 0 || c.CoalesceStepMs > 200 {
+		return fmt.Errorf("%w: coalesce_step_ms must be in [0, 200] (got %d)", ErrInvalidConfig, c.CoalesceStepMs)
 	}
 	if _, err := DecodeKey(c.Server.Key); err != nil {
 		return err

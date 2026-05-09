@@ -175,6 +175,30 @@ comma-separated string):
 Migrate older configs with `beacongate-admin migrate-config --file
 client_config.json`.
 
+### Adaptive uplink coalescing (`coalesce_step_ms`)
+
+For interactive workloads (SSH typing, IRC, REST polling), the
+default fires one HTTP POST per outbound frame — a chatty SSH session
+can drain a single Google account's daily Apps Script quota in under
+an hour. Setting `coalesce_step_ms` to a positive value makes the pump
+wait that many milliseconds for additional outbound frames before
+firing the request, and resets the timer on each new frame
+(adaptive). Trades latency for ~80% fewer POSTs on bursty workloads.
+
+```json
+{
+  ...,
+  "coalesce_step_ms": 30
+}
+```
+
+- `0` (default) — off, every frame fires immediately.
+- `20–40` — recommended starting range; 30ms is a sensible default.
+- Max `200` — hard cap; values above hurt perceived responsiveness.
+
+A safety cap of 5× the window prevents a steady stream of frames
+from deferring the flush indefinitely.
+
 ### SOCKS5 username/password authentication (optional)
 
 The local SOCKS5 listener supports RFC 1929 username/password auth.
