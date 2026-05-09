@@ -32,6 +32,16 @@ const (
 	defaultActiveTimeout = 35 * time.Second
 	defaultInboxCapacity = 64
 	defaultMaxChunk      = 16 * 1024
+	// defaultCoalesceWindow batches outbound frames that arrive within
+	// this window into a single POST. Curl's TLS Finished and the
+	// HTTP request that follows are typically <1 ms apart; without
+	// coalescing they hit two separate ticks → two POSTs → two Apps
+	// Script round-trips of overhead. 5 ms is invisible to a human
+	// (TCP/IP scheduling jitter is larger) and reliably catches
+	// keystroke-spaced writes too. Operators can override via
+	// coalesce_step_ms in the config file, including setting a
+	// larger window for SSH-style quota-economy workloads.
+	defaultCoalesceWindow = 5 * time.Millisecond
 )
 
 // Pump drives the client transport. It splits work between two
@@ -119,14 +129,15 @@ type Pump struct {
 
 func NewPump(rt *Runtime) *Pump {
 	return &Pump{
-		rt:        rt,
-		idleHold:  defaultIdleHold,
-		inboxCap:  defaultInboxCapacity,
-		sessions:  map[string]*ClientSession{},
-		flush:     make(chan struct{}, 1),
-		flushIdle: make(chan struct{}, 1),
-		stop:      make(chan struct{}),
-		stopped:   make(chan struct{}),
+		rt:             rt,
+		idleHold:       defaultIdleHold,
+		inboxCap:       defaultInboxCapacity,
+		sessions:       map[string]*ClientSession{},
+		flush:          make(chan struct{}, 1),
+		flushIdle:      make(chan struct{}, 1),
+		stop:           make(chan struct{}),
+		stopped:        make(chan struct{}),
+		coalesceWindow: defaultCoalesceWindow,
 	}
 }
 

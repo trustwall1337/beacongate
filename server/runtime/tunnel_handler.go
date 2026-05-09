@@ -120,29 +120,35 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	//   - Probe-only (idle) batches  → longPollWindow (8s default).
 	//     Server holds for upstream-originated data so a fresh response
 	//     can ship without waiting for the client's next POST.
-	//   - Batches carrying DATA       → activeDrainWindow (1s default).
-	//     Server holds long enough for the upstream's response to fold
-	//     back into the SAME POST that carried the request — saves a
-	//     full Apps Script round-trip per logical SOCKS request. The
-	//     wait short-circuits on the per-client signal as soon as
-	//     upstream data arrives, so a fast upstream returns
-	//     immediately. The 1s ceiling caps the stall on legs that
-	//     produce no upstream response (e.g. TLS 1.3 client Finished);
-	//     late responses (>1s upstream RTT) flow back on the client's
-	//     standing idle long-poll worker without waiting for the next
-	//     active POST.
-	//   - All other active batches (OPEN-only, CLOSE-only, etc.) →
-	//     short drainWindow (25ms). These do not push upstream bytes
-	//     so there is no plausible same-POST response to wait for;
-	//     the legacy "return promptly" behaviour applies.
+	//   - Batches carrying DATA or OPEN → activeDrainWindow (1s default).
+	//     For DATA batches the wait gives the upstream's response a
+	//     chance to fold back into the SAME POST that carried the
+	//     request — saves a full Apps Script round-trip per logical
+	//     SOCKS request. For OPEN-bearing batches the wait gives the
+	//     *next* POST's DATA-ClientHello room to arrive, get forwarded
+	//     to the just-dialed upstream, and have the upstream's
+	//     ServerHello drained back through this POST — folding the TLS
+	//     handshake's first leg into one Apps Script call instead of
+	//     two. Both waits short-circuit on the per-client signal, so a
+	//     fast upstream / quickly-following ClientHello returns
+	//     immediately; the 1s ceiling only fires on legs that produce
+	//     no upstream response (e.g. TLS 1.3 client Finished) or on
+	//     OPEN+idle patterns where the user opens a session and
+	//     doesn't write to it. Late responses (>1s upstream RTT) flow
+	//     back on the client's standing idle long-poll worker without
+	//     waiting for the next active POST.
+	//   - All other active batches (CLOSE-only, RESET, OPEN+CLOSE, etc.)
+	//     → short drainWindow (25ms). These tear sessions down or have
+	//     no plausible same-POST response to wait for; the legacy
+	//     "return promptly" behaviour applies.
 	longPoll := isIdleBatch(env)
-	hasData := hasDataPayload(env)
+	wantActiveDrain := hasActiveDrainPayload(env)
 	s.mu.Lock()
 	var window time.Duration
 	switch {
 	case longPoll:
 		window = s.longPollWindow
-	case hasData && s.activeDrainWindow > 0:
+	case wantActiveDrain && s.activeDrainWindow > 0:
 		window = s.activeDrainWindow
 	default:
 		window = s.drainWindow
@@ -463,17 +469,45 @@ func isIdleBatch(env protocol.Envelope) bool {
 	return true
 }
 
-// hasDataPayload reports whether the inbound envelope carries any DATA
-// frame. Only DATA pushes bytes upstream and therefore can plausibly
-// trigger a return-trip response — OPEN, CLOSE, RESET, PING and PROBE
-// do not. The server uses the longer activeDrainWindow only for batches
-// that actually have a chance of producing a response on the same POST,
-// so a CLOSE-only or OPEN-only batch returns promptly instead of
-// stalling the next request behind a 5 s wait that is structurally
-// impossible to satisfy.
-func hasDataPayload(env protocol.Envelope) bool {
+// hasActiveDrainPayload reports whether the inbound envelope is a
+// candidate for the longer activeDrainWindow.
+//
+// DATA frames push bytes upstream and can plausibly trigger a return-
+// trip response, so they qualify. OPEN frames don't produce upstream
+// bytes themselves, but they almost always precede a DATA-ClientHello
+// from the same client within tens of milliseconds — by holding the
+// OPEN POST in active-drain we give that ClientHello room to arrive
+// (on the next POST), be forwarded to the just-dialed upstream, and
+// have the upstream's ServerHello drained back into the OPEN POST's
+// response. That collapses the TLS handshake's first two legs into
+// one Apps Script round-trip.
+//
+// CLOSE / RESET tear sessions down — there's nothing to wait for, so
+// they fall through to the short drainWindow. A batch containing both
+// OPEN and CLOSE for the same session also doesn't qualify: by the
+// time we reach the drain phase the session is gone.
+func hasActiveDrainPayload(env protocol.Envelope) bool {
+	hasData := false
+	openIDs := map[string]struct{}{}
+	closeIDs := map[string]struct{}{}
 	for _, m := range env.Messages {
-		if m.Type == protocol.MessageTypeData {
+		switch m.Type {
+		case protocol.MessageTypeData:
+			hasData = true
+		case protocol.MessageTypeOpen:
+			openIDs[m.SessionID] = struct{}{}
+		case protocol.MessageTypeClose, protocol.MessageTypeReset:
+			closeIDs[m.SessionID] = struct{}{}
+		}
+	}
+	if hasData {
+		return true
+	}
+	// OPEN qualifies only if the same batch isn't tearing the session
+	// back down. An [OPEN, CLOSE] pair for the same session has nothing
+	// for active-drain to wait on.
+	for id := range openIDs {
+		if _, closed := closeIDs[id]; !closed {
 			return true
 		}
 	}
