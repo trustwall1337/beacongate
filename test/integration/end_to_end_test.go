@@ -109,7 +109,10 @@ func setup(t *testing.T) *harness {
 	}
 
 	engine := policy.NewEngine()
-	dialer := upstream.NewNetDialer(2 * time.Second)
+	dialer, derr := upstream.NewNetDialer(2*time.Second, "")
+	if derr != nil {
+		t.Fatal(derr)
+	}
 	dialer.Safety.AllowPrivate = true // integration test uses loopback echo
 	srv := serverruntime.New("server-it", sealer, dialer, &itPolicyEvaluator{engine: engine})
 	mux := http.NewServeMux()

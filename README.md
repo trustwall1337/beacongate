@@ -157,6 +157,28 @@ comma-separated string):
 Migrate older configs with `beacongate-admin migrate-config --file
 client_config.json`.
 
+### SOCKS5 username/password authentication (optional)
+
+The local SOCKS5 listener supports RFC 1929 username/password auth.
+Empty username = no auth (default), suitable for single-user laptops
+where `127.0.0.1` is already a trust boundary. **Set both
+`socks.username` and `socks.password` if you bind the listener to a
+non-loopback address (LAN sharing) — without auth, anyone on the LAN
+can drain your daily Apps Script quota.**
+
+```json
+{
+  "listen_addr": "0.0.0.0:1080",
+  "socks": {
+    "username": "alice",
+    "password": "long-random-shared-secret"
+  },
+  ...
+}
+```
+
+Connect with `curl -x socks5://alice:long-random-shared-secret@host:1080 ...`.
+
 ---
 
 ## Common mistakes (and how to recognize them)

@@ -7,9 +7,13 @@ package upstream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 type Dialer interface {
@@ -21,20 +25,63 @@ type NetDialer struct {
 	DialTimeout   time.Duration
 	DefaultDialer net.Dialer
 	Safety        SafetyConfig
+
+	// ProxyDialer routes the actual TCP dial through a SOCKS5 proxy
+	// (e.g. Cloudflare WARP) when set. The SSRF guard still runs
+	// against the *resolved destination IP* — we resolve locally
+	// before handing the (resolved) hostport to the proxy, so a
+	// compromised client cannot use the proxy to bypass our SSRF
+	// gate. Trade-off: DNS-via-proxy (Goose's "target sites see
+	// Cloudflare IP for DNS too") is sacrificed; only the dial
+	// itself goes through the proxy. The user-visible Cloudflare-
+	// egress-IP property is preserved (target servers see the
+	// proxy's egress IP for the TCP connection).
+	ProxyDialer proxy.Dialer
 }
 
-func NewNetDialer(timeout time.Duration) *NetDialer {
-	return &NetDialer{
+// NewNetDialer constructs a server-side outbound dialer. If
+// upstreamProxy is non-empty, it must be a "socks5://host:port" URL;
+// outbound dials are routed through that proxy after the SSRF guard
+// runs locally on the resolved destination IP.
+func NewNetDialer(timeout time.Duration, upstreamProxy string) (*NetDialer, error) {
+	d := &NetDialer{
 		DialTimeout:   timeout,
 		DefaultDialer: net.Dialer{Timeout: timeout},
 		Resolver:      NewDNSCache(60 * time.Second),
 	}
+	if upstreamProxy != "" {
+		u, err := url.Parse(upstreamProxy)
+		if err != nil {
+			return nil, fmt.Errorf("upstream proxy URL %q: %w", upstreamProxy, err)
+		}
+		if u.Scheme != "socks5" {
+			return nil, fmt.Errorf("upstream proxy: only socks5:// scheme supported (got %q)", u.Scheme)
+		}
+		pd, err := proxy.FromURL(u, &d.DefaultDialer)
+		if err != nil {
+			return nil, fmt.Errorf("upstream proxy dialer: %w", err)
+		}
+		d.ProxyDialer = pd
+	}
+	return d, nil
+}
+
+// contextDialer is the optional context-aware extension to
+// proxy.Dialer. The stdlib SOCKS5 implementation in golang.org/x/net
+// satisfies this since Go 1.16; we type-assert at call time so old
+// proxy.Dialer implementations still work via the basic Dial method.
+type contextDialer interface {
+	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // Dial resolves host, validates the resulting IP against the safety policy
 // (SSRF guard), and only then opens the TCP connection. Hostnames that
 // resolve to multiple IPs are rejected if any candidate is unsafe — we
 // never silently fall back to a "different" IP.
+//
+// When ProxyDialer is set, the (resolved, safety-checked) hostport is
+// dialed through the SOCKS5 proxy rather than directly. SSRF runs
+// locally either way.
 func (d *NetDialer) Dial(ctx context.Context, host string, port uint16) (net.Conn, error) {
 	ip, err := d.resolve(ctx, host)
 	if err != nil {
@@ -43,11 +90,17 @@ func (d *NetDialer) Dial(ctx context.Context, host string, port uint16) (net.Con
 	if err := IsUnsafe(ip, d.Safety); err != nil {
 		return nil, err
 	}
+	hostport := net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
+	if d.ProxyDialer != nil {
+		if cd, ok := d.ProxyDialer.(contextDialer); ok {
+			return cd.DialContext(ctx, "tcp", hostport)
+		}
+		return d.ProxyDialer.Dial("tcp", hostport)
+	}
 	dialer := d.DefaultDialer
 	if d.DialTimeout > 0 && dialer.Timeout == 0 {
 		dialer.Timeout = d.DialTimeout
 	}
-	hostport := net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
 	return dialer.DialContext(ctx, "tcp", hostport)
 }
 

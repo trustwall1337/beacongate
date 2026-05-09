@@ -21,5 +21,6 @@
   "limits": {
     "max_sessions_per_client": 100,
     "idle_session_timeout_seconds": 600
-  }
+  },
+  "upstream_proxy": ""
 }

@@ -96,11 +96,17 @@ func main() {
 		engine.Replace(append(engine.Rules(), fs.List()...))
 	}
 
-	dialer := upstream.NewNetDialer(10 * time.Second)
+	dialer, err := upstream.NewNetDialer(10*time.Second, cfg.UpstreamProxy)
+	if err != nil {
+		log.Fatalf("upstream dialer: %v", err)
+	}
 	dialer.Safety = upstream.SafetyConfig{
 		AllowPrivate:  cfg.Safety.AllowPrivate,
 		AllowMetadata: cfg.Safety.AllowMetadata,
 		ExtraBlocked:  cfg.Safety.ExtraBlocked,
+	}
+	if cfg.UpstreamProxy != "" {
+		logger.Info("server.upstream_proxy", "url", cfg.UpstreamProxy)
 	}
 	srv := serverruntime.New(cfg.ServerID, sealer, dialer, policyEvaluator{engine: engine})
 	srv.SetLogger(logger.With("service", "server", "server_id", cfg.ServerID))

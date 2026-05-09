@@ -1,6 +1,10 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+	"strings"
+)
 
 type ServerConfig struct {
 	ServerID   string             `json:"server_id"`
@@ -12,6 +16,16 @@ type ServerConfig struct {
 	HealthPath string             `json:"health_path,omitempty"`
 	Safety     ServerSafetyConfig `json:"safety"`
 	Limits     ServerLimitsConfig `json:"limits"`
+	// UpstreamProxy optionally routes ALL outbound connections (the
+	// dials the server makes to fulfil tunneled CONNECT requests)
+	// through a SOCKS5 proxy. Useful when the VPS's datacenter IP is
+	// blocked by Cloudflare bot scoring or similar — set this to a
+	// local Cloudflare WARP socks5 endpoint
+	// (e.g. "socks5://127.0.0.1:40000") so destinations see the
+	// Cloudflare egress IP instead of the VPS IP. DNS is resolved at
+	// the proxy (socks5h semantics). Empty = dial directly. Must be
+	// "socks5://..." if set; other schemes are rejected.
+	UpstreamProxy string `json:"upstream_proxy,omitempty"`
 }
 
 // ServerSafetyConfig controls the SSRF guard. The defaults block private,
@@ -59,6 +73,18 @@ func (c *ServerConfig) Validate() error {
 	}
 	if c.Admin.Enabled && c.Admin.ListenAddr == "" {
 		return fmt.Errorf("%w: admin.listen_addr required when admin.enabled", ErrInvalidConfig)
+	}
+	if s := strings.TrimSpace(c.UpstreamProxy); s != "" {
+		u, err := url.Parse(s)
+		if err != nil {
+			return fmt.Errorf("%w: upstream_proxy not a valid URL: %v", ErrInvalidConfig, err)
+		}
+		if u.Scheme != "socks5" {
+			return fmt.Errorf("%w: upstream_proxy must use socks5:// scheme (got %q)", ErrInvalidConfig, u.Scheme)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("%w: upstream_proxy missing host:port", ErrInvalidConfig)
+		}
 	}
 	return nil
 }

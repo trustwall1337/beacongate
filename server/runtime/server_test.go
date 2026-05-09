@@ -23,7 +23,10 @@ func u64(v uint64) *uint64 { return &v }
 // suite can run an in-process echo server. Production deployments leave
 // AllowPrivate=false (SSRF guard).
 func testDialer(timeout time.Duration) *upstream.NetDialer {
-	d := upstream.NewNetDialer(timeout)
+	d, err := upstream.NewNetDialer(timeout, "")
+	if err != nil {
+		panic(err)
+	}
 	d.Safety.AllowPrivate = true
 	return d
 }

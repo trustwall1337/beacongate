@@ -198,6 +198,29 @@ curl -fsS https://relay.your-domain.com/healthz   # returns "ok"
 curl -x socks5h://127.0.0.1:1080 https://example.com
 ```
 
+### Optional: SOCKS5 auth + LAN sharing
+
+By default the client binds to `127.0.0.1:1080` so only the local
+machine can use the tunnel. For LAN-shared deployments (one client
+serving multiple devices on a home network), set `listen_addr` to
+`0.0.0.0:1080` AND set `socks.username` + `socks.password` — without
+auth, anyone on the LAN can drain your daily Apps Script quota.
+
+```json
+{
+  "listen_addr": "0.0.0.0:1080",
+  "socks": {
+    "username": "alice",
+    "password": "long-random-shared-secret"
+  },
+  "server": { ... },
+  "transport": { ... }
+}
+```
+
+Devices on the LAN connect with
+`curl -x socks5://alice:long-random-shared-secret@<lan-ip>:1080 ...`.
+
 ---
 
 # Playbook B: Apps Script deployment (`appsscript` mode)
@@ -409,6 +432,70 @@ either a clock drift or someone else is hitting your deployment.
 If a deployment hits its quota mid-day, the client puts it in a long
 backoff (30 min) and uses other entries in `script_keys` until the
 midnight Pacific reset.
+
+---
+
+## Optional: route outbound through a proxy (`upstream_proxy`)
+
+By default the BeaconGate server dials destinations directly from
+the VPS. The destination sees the VPS's datacenter IP. **Cloudflare
+and other bot-defense systems score datacenter IPs heavily — many
+Cloudflare-protected sites will challenge with captchas or block
+outright.** Routing the VPS's outbound through a SOCKS5 proxy (e.g.
+Cloudflare WARP) makes the destination see the proxy's egress IP
+instead.
+
+Set `upstream_proxy` in `server_config.json`:
+
+```json
+{
+  ...,
+  "upstream_proxy": "socks5://127.0.0.1:40000"
+}
+```
+
+Validation: only `socks5://host:port` is accepted; other schemes are
+rejected at config-load time.
+
+### Cloudflare WARP setup (typical case)
+
+1. Install the WARP client on your VPS:
+   ```sh
+   # Debian/Ubuntu
+   curl https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+   echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+   sudo apt update && sudo apt install cloudflare-warp -y
+   ```
+2. Register and enable the proxy mode:
+   ```sh
+   sudo warp-cli registration new
+   sudo warp-cli mode proxy
+   sudo warp-cli proxy port 40000
+   sudo warp-cli connect
+   ```
+3. Verify WARP is reachable on the local SOCKS5 port:
+   ```sh
+   curl -x socks5://127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace
+   # the "ip=" line should be a Cloudflare egress IP, not your VPS IP
+   ```
+4. Set `upstream_proxy: "socks5://127.0.0.1:40000"` in
+   `server_config.json` and restart the server.
+
+### Trust model with `upstream_proxy`
+
+- **SSRF guard still runs locally on the resolved destination IP.**
+  The server resolves the hostname and validates the IP before
+  handing the dial to the proxy. A compromised client cannot use
+  the proxy to bypass our private/loopback/metadata block list.
+- **DNS-via-proxy is NOT preserved.** Goose's docs claim DNS goes
+  through the proxy too; ours doesn't (we resolve locally for SSRF
+  enforcement). The user-visible Cloudflare-egress-IP property holds
+  for TCP, but DNS leaks through the VPS's resolver. If DNS-leak
+  protection matters, set the VPS resolver to a privacy-friendly
+  service (`1.1.1.1`, `9.9.9.9`).
+- **The proxy itself is operator-trusted.** A malicious local
+  SOCKS5 proxy could redirect every dial. Run only proxies you
+  control.
 
 ---
 

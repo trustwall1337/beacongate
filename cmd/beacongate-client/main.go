@@ -91,6 +91,11 @@ func main() {
 		"transport_healthy", report.Transport.Healthy,
 		"probe_ok", report.ProbeOK,
 		"probe_err", report.ProbeErr)
+	if report.Transport.Healthy && report.ProbeOK {
+		clientLogger.Info("preflight.ok",
+			"summary", "relay healthy, AES key matches end-to-end",
+			"elapsed_ms", report.Elapsed.Milliseconds())
+	}
 
 	pump := clientruntime.NewPump(rt)
 	pump.Start()
