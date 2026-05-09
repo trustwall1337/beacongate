@@ -16,18 +16,15 @@ apps point their proxy setting at the local BeaconGate process; their
 traffic travels encrypted to the remote BeaconGate process, which makes
 the real outbound TCP connection on their behalf.
 
-> **Transport status (as of pre-v1.1):** the only transport that ships
-> today is a **direct HTTPS POST** to an operator-configured URL
-> (package `engine/transport/google`, named for historical reasons —
-> being renamed to `https` in v1.1). It does NOT disguise the traffic
-> as Google traffic; a network observer sees TLS to your operator's
-> relay hostname.
->
-> The **`appsscript` transport — the actual censorship-evasion path
-> that tunnels through Google Apps Script so the wire looks like
-> ordinary HTTPS to `script.google.com` — lands in v1.1**. Until then,
-> use the `https` transport behind your own CDN / domain-fronting setup
-> if you need on-path-censor evasion.
+> **Transport status (v1.1, current):** two transports ship today.
+> `engine/transport/https` is a direct HTTPS POST to an
+> operator-configured URL — operator-controlled relay, NOT a
+> censorship-evasion path on its own. `engine/transport/appsscript`
+> tunnels every batch through a user-deployed Google Apps Script web
+> app, so the wire path terminates at a real Google IP with
+> `SNI=www.google.com` and HTTP `Host: script.google.com` — that is
+> the actual censorship-evasion property. The deployment-mode matrix
+> in [deployment.md](deployment.md) compares the two.
 
 ---
 
@@ -245,10 +242,10 @@ engine/                 Shared Go code used by BOTH client and server
   session/                Session state machine
   config/                 JSON config loader
   transport/              Abstraction for "how do encrypted batches travel?"
-    google/                 Direct HTTPS POST transport (renamed to `https` in v1.1).
-                              NOT a Google-disguised path despite the name.
-    appsscript/             (v1.1) Apps-Script-tunneled transport — the
-                              actual censorship-evasion path
+    https/                  Direct HTTPS POST transport — operator-controlled
+                              relay, NOT a censorship-evasion path on its own.
+    appsscript/             Apps-Script-tunneled transport — the actual
+                              censorship-evasion path (ships in v1.1).
     transporttest/          httptest-style fakes for tests
 
 client/                 BeaconGate client-only code
@@ -303,7 +300,7 @@ A package's location tells you who can use it:
 
 | Term | Definition |
 | --- | --- |
-| **Transport** | The abstraction for *how* encrypted batches get from client to server. The shipping transport pre-v1.1 is **direct HTTPS POST** (the `engine/transport/google` package, renamed to `https` in v1.1) — it connects directly to the operator's relay URL and does NOT disguise the traffic as Google. The actual Google-tunneled censorship-evasion transport (`engine/transport/appsscript`) lands in v1.1. The protocol is transport-agnostic — adding QUIC, WebSocket, or another fronting path means a new package, not a rewrite. |
+| **Transport** | The abstraction for *how* encrypted batches get from client to server. Two transports ship in v1.1: `engine/transport/https` (direct HTTPS POST to an operator-controlled relay — does NOT disguise as Google on its own) and `engine/transport/appsscript` (tunnels each batch through a user-deployed Google Apps Script web app — the actual censorship-evasion path). The protocol is transport-agnostic — adding QUIC, WebSocket, or another fronting path means a new package, not a rewrite. |
 | **Pump** | The client's per-process request scheduler ([client/runtime/sessions.go](../client/runtime/sessions.go)). Maintains one in-flight HTTP request at a time; carries outbound traffic when there is any, otherwise sends a PROBE that the server holds open ("long-poll") so server-originated bytes can flow back. |
 | **Long-poll** | Server-side technique to deliver data over a request/response transport. When the server has nothing to send, it holds the client's request open up to ~25 seconds, returning early as soon as upstream bytes arrive. Reduces idle bandwidth from ~13 req/s to ~1 req per 25s. |
 | **Tunnel handler** | The server's HTTP handler at `/tunnel`. Decrypts, dispatches messages to sessions, drains pending upstream bytes, encrypts the response. |
@@ -318,9 +315,9 @@ A package's location tells you who can use it:
 
 | Term | Definition |
 | --- | --- |
-| **client_id** | Stable identifier the client puts in every envelope. Lets the server isolate sessions per client. Not a credential — auth is by shared AEAD key. |
+| **client_id** | Stable identifier the client puts in every envelope. Lets the server isolate sessions per client. As of v1.1 it is **AAD-bound** in the wire envelope, so a captured packet posted with a swapped cleartext id fails authentication. |
 | **server_id** | Symmetric: the server's identity, written into responses. |
-| **AEAD key** | A 32-byte secret shared between client and server. Both sides hold the same key; a client without the key cannot send a valid envelope, and a wrong-keyed envelope fails the AEAD tag check (server returns 401). |
+| **AEAD key** | A 32-byte master secret shared between client and server. As of v1.1, the actual per-message AEAD key is **HKDF-derived per `client_id`** from this master, so a leaked derived key compromises only that one client, not the whole fleet. A wrong-keyed envelope fails the AEAD tag check (server returns 401). |
 | **Bearer token** | Optional credential for the server's admin API in remote mode. Different from the AEAD key. |
 
 ### Operational terms
@@ -330,8 +327,8 @@ A package's location tells you who can use it:
 | **Tunnel path** | The HTTP path the server listens on for encrypted batches. Default `/tunnel`, configurable. |
 | **Health path** | A simple `200 OK` endpoint for liveness checks. Default `/healthz`. |
 | **Admin API** | A separate HTTP listener (default `127.0.0.1:9090`) for managing policy at runtime. Loopback-only by default, optionally bearer-token-authenticated for remote use. |
-| **Control API** (client side) | Symmetric local-only HTTP API on the client (`127.0.0.1:9091`) so a desktop UI can read status, run diagnostics, etc. |
-| **Profile** | A combined client config (server URL, key, transport options). Future desktop UI lets users switch between profiles. |
+| **Control API** (client side) | Local-only HTTP API on the client (default `127.0.0.1:9091`). Phase 1 surface: `GET /api/status`, `GET /api/health`, `GET /api/diagnose`, `GET /api/events`, `POST /api/validate`. Lifecycle (connect/disconnect) and profile CRUD are deferred to a future desktop wrapper. |
+| **Profile** | A client config (server URL, key, transport options). Phase 1 uses a single config file passed via `-config`; a multi-profile abstraction is deferred to the future desktop wrapper. |
 
 ---
 
@@ -375,10 +372,11 @@ Who has to trust whom:
   does not have the destination's private key, cannot MITM the TLS
   handshake, and does not know the plaintext.
 - **The BeaconGate server trusts the AEAD key.** A correct AEAD
-  signature from the client is the *only* authentication. Compromise
-  of the key compromises every client and every session that key has
-  ever protected. Per-client key derivation is on the v1.1 roadmap
-  (see [protocol.md "Future Compatibility Notes"](protocol.md)).
+  signature from the client is the *only* authentication.
+  As of v1.1 the per-message key is HKDF-derived per `client_id`
+  from the shared master, so a leak of one client's *derived* key
+  compromises only that client. A leak of the *master* still
+  compromises every client.
 - **The operator trusts the SSRF guard and the policy engine** to
   prevent the relay from being weaponized to scan internal networks or
   reach abuse-prone destinations. Both are on by default.
@@ -406,7 +404,9 @@ For readers who want to follow it through the source:
    [client/runtime/sessions.go](../client/runtime/sessions.go).
 4. The pump's loop builds an envelope, encodes it as JSON, AEAD-seals
    it, POSTs it to the server's `/tunnel` URL via
-   [engine/transport/google/client.go](../engine/transport/google/client.go).
+   [engine/transport/https/client.go](../engine/transport/https/client.go)
+   or [engine/transport/appsscript/client.go](../engine/transport/appsscript/client.go),
+   depending on the configured transport.
 5. Server's tunnel handler ([server/runtime/tunnel_handler.go](../server/runtime/tunnel_handler.go)):
    AEAD-opens, decodes, dispatches each message.
 6. For the `OPEN`: enforce per-client session cap → run policy
@@ -446,23 +446,24 @@ In this order:
 
 ## 11. Future shape (not built yet)
 
+The Phase 1 deliverables (engine, both transports, minimal client
+control surface, Android-via-Termux operator handoff) are complete.
+Phase 2+ items, in rough order:
+
 - **Desktop product** ([../desktop/README.md](../desktop/README.md)) —
   a UI that talks to the local control API. Language TBD (Tauri,
-  Electron, or native).
-- **Mobile** ([../mobile/README.md](../mobile/README.md)) — strategy
-  step before any code. iOS / Android subtrees reserved.
-- **`appsscript` transport (v1.1)** — the censorship-evasion path that
-  tunnels every batch through a user-deployed Google Apps Script web
-  app, so the network path terminates at a real Google IP with
-  `SNI=www.google.com` and HTTP `Host: script.google.com`. This is the
-  property the project is named for; it is not yet implemented in
-  `master`.
-- **Per-client AEAD keys (v1.1)** — derived from a master via HKDF,
-  with `client_id` in a small cleartext header so the server picks
-  the right key before AEAD-opening. Lands together with the
-  `appsscript` transport in the v1.1 protocol bump.
-- **Replay protection (v1.1)** — timestamp + replay-id inside the
-  AEAD, sliding-window dedup cache server-side. Lands with v1.1.
-- **Additional transports beyond v1.1** — anything that can carry
-  opaque encrypted batches: WebSocket, QUIC, Cloudflare Worker, etc.
+  Electron, or native). Drives the missing STEP-2 endpoints
+  (`POST /api/connect`, `POST /api/disconnect`, profile CRUD,
+  `POST /api/profiles/{id}/validate`).
+- **Native mobile** ([../mobile/README.md](../mobile/README.md)) —
+  iOS and Android apps. The Phase 1 Android end-user experience uses
+  Termux + NekoBox/v2rayNG (see
+  [docs/android-termux.md](android-termux.md)); native apps are a
+  Phase 4 polish, not a precondition.
+- **Additional transports** — anything that can carry opaque
+  encrypted batches: WebSocket, QUIC, Cloudflare Worker, etc.
   Each is a new package under `engine/transport/`.
+- **Operator observability beyond `journalctl`** — Prometheus
+  exporters, structured-log reference, dashboard templates. Phase 1
+  ships only the journal-based path because the Phase-1 deployment
+  shape is "one operator, one VPS."

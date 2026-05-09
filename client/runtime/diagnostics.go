@@ -25,12 +25,25 @@ func (r *Runtime) RunStartupDiagnostics(ctx context.Context) StartupDiagnostics 
 	if err != nil {
 		diag.ProbeErr = err.Error()
 		diag.Elapsed = time.Since(start)
+		r.RecordError(err.Error())
+		r.SetState(StateError)
 		return diag
 	}
 	if _, err := r.Probe(ctx); err != nil {
 		diag.ProbeErr = err.Error()
+		r.RecordError(err.Error())
+		// transport reachable but probe failed = degraded (auth/version
+		// mismatch); transport unreachable = error. The Healthy bit
+		// disambiguates.
+		if tDiag.Healthy {
+			r.SetState(StateDegraded)
+		} else {
+			r.SetState(StateError)
+		}
 	} else {
 		diag.ProbeOK = true
+		r.RecordSuccessfulProbe()
+		r.SetState(StateConnected)
 	}
 	diag.Elapsed = time.Since(start)
 	return diag

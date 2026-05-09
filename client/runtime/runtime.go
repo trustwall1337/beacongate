@@ -11,13 +11,45 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/trustwall1337/beacongate/engine/config"
 	"github.com/trustwall1337/beacongate/engine/crypto"
 	"github.com/trustwall1337/beacongate/engine/protocol"
 	"github.com/trustwall1337/beacongate/engine/transport"
 )
+
+// State enumerates the coarse lifecycle states surfaced through the
+// control API. The runtime moves Starting → Connected on the first
+// successful probe; transient failures move Connected → Degraded;
+// Close moves any state to Stopped.
+type State int32
+
+const (
+	StateStarting State = iota
+	StateConnected
+	StateDegraded
+	StateError
+	StateStopped
+)
+
+func (s State) String() string {
+	switch s {
+	case StateStarting:
+		return "starting"
+	case StateConnected:
+		return "connected"
+	case StateDegraded:
+		return "degraded"
+	case StateError:
+		return "error"
+	case StateStopped:
+		return "stopped"
+	}
+	return "unknown"
+}
 
 var ErrClosed = errors.New("client runtime: closed")
 
@@ -34,6 +66,13 @@ type Runtime struct {
 	counter atomic.Uint64
 
 	logger atomic.Pointer[slog.Logger]
+
+	state         atomic.Int32 // State value; reads and writes go through helper methods
+	activeProfile atomic.Pointer[string]
+
+	statusMu            sync.Mutex
+	lastError           string
+	lastSuccessfulProbe time.Time
 }
 
 // New builds a Runtime from a validated client config and a constructed
@@ -55,8 +94,66 @@ func New(cfg *config.ClientConfig, t transport.ClientTransport) (*Runtime, error
 	}
 	rt := &Runtime{cfg: cfg, sealer: sealer, transport: t}
 	rt.logger.Store(discardLogger)
+	rt.state.Store(int32(StateStarting))
 	return rt, nil
 }
+
+// State returns the current lifecycle state.
+func (r *Runtime) State() State { return State(r.state.Load()) }
+
+// SetState atomically updates the lifecycle state. Callers (the pump,
+// startup diagnostics, the SOCKS server) move the state from observed
+// signals — this is not driven by the control API.
+func (r *Runtime) SetState(s State) { r.state.Store(int32(s)) }
+
+// SetActiveProfile records the human-facing profile name (Phase 1: the
+// config filename). Surfaced through the control API so an operator
+// can confirm which config the running client is using.
+func (r *Runtime) SetActiveProfile(name string) {
+	if name == "" {
+		return
+	}
+	cp := name
+	r.activeProfile.Store(&cp)
+}
+
+// ActiveProfile returns the active profile name set by SetActiveProfile,
+// or the empty string if none was set.
+func (r *Runtime) ActiveProfile() string {
+	if p := r.activeProfile.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// RecordError stores a human-readable error string for the control
+// API's status surface. Pass empty string to clear.
+func (r *Runtime) RecordError(msg string) {
+	r.statusMu.Lock()
+	r.lastError = msg
+	r.statusMu.Unlock()
+}
+
+// RecordSuccessfulProbe stamps "now" as the last successful probe time
+// and clears any prior recorded error.
+func (r *Runtime) RecordSuccessfulProbe() {
+	now := time.Now()
+	r.statusMu.Lock()
+	r.lastSuccessfulProbe = now
+	r.lastError = ""
+	r.statusMu.Unlock()
+}
+
+// StatusSnapshot returns the (lastError, lastSuccessfulProbe) tuple
+// under a single lock acquisition. Used by the control API.
+func (r *Runtime) StatusSnapshot() (lastError string, lastSuccessfulProbe time.Time) {
+	r.statusMu.Lock()
+	defer r.statusMu.Unlock()
+	return r.lastError, r.lastSuccessfulProbe
+}
+
+// Config returns the loaded client config. Read-only — do not mutate.
+func (r *Runtime) Config() *config.ClientConfig { return r.cfg }
 
 // SetLogger installs a structured logger. Pass nil to silence.
 func (r *Runtime) SetLogger(l *slog.Logger) {
@@ -166,5 +263,6 @@ func (r *Runtime) Close() error {
 	if r.closed.Swap(true) {
 		return nil
 	}
+	r.SetState(StateStopped)
 	return r.transport.Close()
 }

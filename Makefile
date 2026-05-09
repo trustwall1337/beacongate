@@ -1,6 +1,6 @@
 .PHONY: all ci clean help \
-        go-build go-test go-race go-vet go-fmt go-fmt-check go-lint go-tidy go-bench go-fuzz \
-        build test race vet fmt fmt-check lint tidy bench fuzz \
+        go-build go-build-android go-test go-race go-vet go-fmt go-fmt-check go-lint go-tidy go-bench go-fuzz \
+        build build-android test race vet fmt fmt-check lint tidy bench fuzz \
         desktop-build desktop-test mobile-build mobile-test \
         docker-build docker-init docker-up docker-down docker-logs docker-status docker-clean
 
@@ -17,19 +17,23 @@ all: build
 
 help:
 	@echo "Top-level targets:"
-	@echo "  make build       - build everything that exists today (currently: Go)"
-	@echo "  make test        - run all tests (currently: Go)"
-	@echo "  make race        - tests with -race detector"
-	@echo "  make ci          - everything CI runs"
+	@echo "  make build         - build everything that exists today (currently: Go)"
+	@echo "  make build-android - cross-compile the client for Android (linux/arm64, runs in Termux)"
+	@echo "  make test          - run all tests (currently: Go)"
+	@echo "  make race          - tests with -race detector"
+	@echo "  make bench         - run benchmarks (engine/transport/appsscript)"
+	@echo "  make fuzz          - run fuzz tests for 30s each (envelope decode + crypto Open)"
+	@echo "  make ci            - everything CI runs"
 	@echo ""
 	@echo "Language-specific (Go):"
-	@echo "  make go-build    - build Go binaries to ./bin/"
-	@echo "  make go-test     - go test ./..."
-	@echo "  make go-race     - go test -race ./..."
-	@echo "  make go-vet      - go vet ./..."
-	@echo "  make go-fmt      - gofmt -w ."
-	@echo "  make go-lint     - golangci-lint run"
-	@echo "  make go-tidy     - go mod tidy"
+	@echo "  make go-build         - build Go binaries to ./bin/"
+	@echo "  make go-build-android - cross-compile beacongate-client for linux/arm64 (Termux on Android)"
+	@echo "  make go-test          - go test ./..."
+	@echo "  make go-race          - go test -race ./..."
+	@echo "  make go-vet           - go vet ./..."
+	@echo "  make go-fmt           - gofmt -w ."
+	@echo "  make go-lint          - golangci-lint run"
+	@echo "  make go-tidy          - go mod tidy"
 	@echo ""
 	@echo "Future subtree targets (no-ops until the subtree exists):"
 	@echo "  make desktop-build, desktop-test"
@@ -48,6 +52,16 @@ help:
 
 go-build:
 	$(GO) build -o $(BIN)/ ./cmd/...
+
+# go-build-android cross-compiles beacongate-client for linux/arm64.
+# Termux is a Linux userland on Android, so a static linux/arm64 binary
+# runs there without an NDK or Android SDK. CGO is off so no glibc
+# dependency leaks in. -trimpath strips the operator's local paths;
+# -ldflags="-s -w" drops the symbol/DWARF tables for a smaller binary.
+go-build-android:
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+	  $(GO) build -trimpath -ldflags="-s -w" \
+	  -o $(BIN)/beacongate-client-android-arm64 ./cmd/beacongate-client
 
 go-test:
 	@if ! find . -name '*.go' -not -path './vendor/*' -print -quit | grep -q .; then \
@@ -115,6 +129,7 @@ mobile-test:
 # --- Aggregate aliases --------------------------------------------------
 
 build: go-build
+build-android: go-build-android
 test: go-test
 race: go-race
 vet: go-vet

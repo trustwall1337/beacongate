@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -52,10 +53,15 @@ func main() {
 	controlAddr := flag.String("control-addr", "", "local control HTTP listen address (e.g. 127.0.0.1:9091)")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
+	validateOnly := flag.Bool("validate-only", false, "validate the config and exit without starting the runtime; prints {\"ok\":bool,...} to stdout")
 	flag.Parse()
 
 	logger := buildLogger(*logLevel, *logFormat)
 	slog.SetDefault(logger)
+
+	if *validateOnly {
+		os.Exit(runValidateOnly(*cfgPath))
+	}
 
 	cfg, err := config.LoadClient(*cfgPath)
 	if err != nil {
@@ -72,6 +78,7 @@ func main() {
 		log.Fatalf("runtime: %v", err)
 	}
 	rt.SetLogger(clientLogger)
+	rt.SetActiveProfile(*cfgPath)
 	defer func() { _ = rt.Close() }()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -185,6 +192,30 @@ func buildAppsScriptTransport(cfg *config.ClientConfig) (transport.ClientTranspo
 		ScriptAccounts: accounts,
 		Fronting:       fronting,
 	})
+}
+
+// runValidateOnly loads and validates the config at cfgPath, prints a
+// JSON result to stdout, and returns the exit code. Used by ops/prepare-bundle.sh
+// and by the verify.sh script bundled into the operator handoff zip.
+//
+// Output schema:
+//
+//	{"ok":true,"client_id":"...","transport":"appsscript","listen_addr":"127.0.0.1:1080"}
+//	{"ok":false,"error":"<message>"}
+func runValidateOnly(cfgPath string) int {
+	enc := json.NewEncoder(os.Stdout)
+	cfg, err := config.LoadClient(cfgPath)
+	if err != nil {
+		_ = enc.Encode(map[string]any{"ok": false, "error": err.Error()})
+		return 1
+	}
+	_ = enc.Encode(map[string]any{
+		"ok":          true,
+		"client_id":   cfg.ClientID,
+		"transport":   cfg.Transport.Type,
+		"listen_addr": cfg.ListenAddr,
+	})
+	return 0
 }
 
 // splitAndTrim splits a comma-separated string and trims whitespace

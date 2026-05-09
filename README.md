@@ -5,25 +5,27 @@ core engine. Encrypted batches travel between a local SOCKS5 client and a
 remote exit server; the exit server enforces server-side outbound policy
 before dialing.
 
-It is a **multi-language monorepo**. The current Go implementation covers
-phases 1 and 2 (engine + control API). Desktop and mobile workstreams are
-reserved as sibling subtrees and will be added in their own languages.
+It is a **multi-language monorepo**. **Phase 1 is complete:** the Go
+implementation ships the v1.1 engine, the `appsscript` censorship-
+evasion transport, the Phase-1 client control surface, and the
+operator-side Android-via-Termux handoff path. Desktop and mobile
+workstreams are reserved as sibling subtrees for Phase 2+.
 
 ## Transport modes
 
 | Mode | Status | What it does | Use it when |
 | --- | --- | --- | --- |
-| `https` (currently named `google` in source — being renamed in v1.1) | **Ships today** | Direct HTTPS POST to an operator-configured URL. Generic HTTPS, **NOT a censorship-evasion path**. A network observer sees TLS to your relay's hostname. | You operate your own relay behind a CDN / your own domain fronting, or you don't need on-path-censor evasion. |
-| `appsscript` | **Lands in v1.1** | Tunnels every batch through a user-deployed Google Apps Script web app. Wire path terminates at a real Google IP with `SNI=www.google.com` and HTTP `Host: script.google.com`. | You need network traffic that looks like ordinary Google/Apps Script traffic to a network observer. |
+| `https` | **Ships today** | Direct HTTPS POST to an operator-configured URL. Generic HTTPS, **NOT a censorship-evasion path on its own**. A network observer sees TLS to your relay's hostname. | You operate your own relay behind a CDN / your own domain fronting, or you don't need on-path-censor evasion. |
+| `appsscript` | **Ships today (v1.1)** | Tunnels every batch through a user-deployed Google Apps Script web app. Wire path terminates at a real Google IP with `SNI=www.google.com` and HTTP `Host: script.google.com`. | You need network traffic that looks like ordinary Google/Apps Script traffic to a network observer. |
 
-> **Note on the historical naming:** the current `engine/transport/google`
-> package was named for the *intended* Google-facing role, but in `master`
-> it is just a generic HTTPS transport. The v1.1 release renames the
-> package to `https` and adds a new `engine/transport/appsscript` package
-> that delivers the actual censorship-evasion property. See
-> [docs/architecture.md](docs/architecture.md) §1 for the full story and
+> **Note on the historical naming:** the v1.0 release shipped a single
+> transport package named `engine/transport/google` that was actually a
+> generic HTTPS POST — the name was aspirational. v1.1 renamed it to
+> `engine/transport/https` (matching reality) and added a new
+> `engine/transport/appsscript` package that delivers the actual
+> censorship-evasion property. See
 > [docs/planning/STEP-1-core-engine.md](docs/planning/STEP-1-core-engine.md)
-> §"Retrospective" for why this gap exists.
+> §"Retrospective" for the full story.
 
 ## Repository layout
 
@@ -36,10 +38,10 @@ beacongate/
     session/                   session state machine
     config/                    JSON config loader
     transport/                 transport abstraction
-      google/                    Direct HTTPS POST transport (renamed `https` in v1.1).
-                                   NOT a Google-disguised path despite the package name.
-      appsscript/                (v1.1) Apps-Script-tunneled transport (the actual
-                                   censorship-evasion path)
+      https/                     Direct HTTPS POST transport — operator-controlled
+                                   relay, NOT a censorship-evasion path on its own.
+      appsscript/                Apps-Script-tunneled transport (the actual
+                                   censorship-evasion path; ships in v1.1)
       transporttest/             httptest-style fakes
   client/                    Go: client side of the relay
     runtime/                   protocol roundtrip, long-poll pump
@@ -51,9 +53,11 @@ beacongate/
     policy/                    rule model, matcher, engine, file store
     admin/                     admin HTTP API + rate-limit
   desktop/                   (Phase 3) reserved for the desktop product
-  mobile/                    (Phase 4) reserved for mobile clients
+  mobile/                    (Phase 4) reserved for native mobile clients.
+                               Phase 1 Android end-users run the linux/arm64
+                               binary in Termux — see docs/android-termux.md.
     ios/                       iOS placeholder
-    android/                   Android placeholder
+    android/                   Android placeholder (no native code in Phase 1)
   protocol/                  cross-language protocol home (schemas later)
   test/integration/          Go cross-package end-to-end tests
   ops/                       Docker, systemd, baseline policy
@@ -87,28 +91,37 @@ curl -x socks5h://127.0.0.1:1080 https://example.com
 ```
 
 See [docs/deployment.md](docs/deployment.md) for the full setup, including
-TLS termination, systemd, Docker Compose, and recovery tips.
+TLS termination, systemd, Docker Compose, and recovery tips. To prepare
+a bundle for an Android friend running Termux + NekoBox/v2rayNG, see
+[docs/operator-handoff-checklist.md](docs/operator-handoff-checklist.md)
+and [docs/android-termux.md](docs/android-termux.md).
 
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — system overview, glossary, diagrams (start here)
-- [docs/protocol.md](docs/protocol.md) — wire protocol v1.0
+- [docs/protocol.md](docs/protocol.md) — wire protocol v1.1
 - [docs/admin-api.md](docs/admin-api.md) — admin API surface
-- [docs/policy.md](docs/policy.md) — policy model and evaluation order
-- [docs/deployment.md](docs/deployment.md) — operator guide
+- [docs/policy.md](docs/policy.md) — policy model, rule operations, audit
+- [docs/deployment.md](docs/deployment.md) — operator deployment guide
+- [docs/troubleshooting.md](docs/troubleshooting.md) — failure-mode runbook
+- [docs/operator-handoff-checklist.md](docs/operator-handoff-checklist.md) — pre-handoff verification
+- [docs/android-termux.md](docs/android-termux.md) — end-user setup on Android (Termux + NekoBox)
 - [SECURITY.md](SECURITY.md) — vulnerability reporting
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contributor guide
 
 ## Development (Go subtree)
 
 ```sh
-make build        # binaries to ./bin/
-make test         # unit + integration
-make race         # tests with race detector
-make vet          # go vet ./...
-make fmt          # gofmt -w .
-make lint         # golangci-lint run
-make ci           # everything CI runs
+make build         # binaries to ./bin/
+make build-android # cross-compile beacongate-client for linux/arm64 (Termux)
+make test          # unit + integration
+make race          # tests with race detector
+make bench         # appsscript transport benchmarks
+make fuzz          # 30s fuzz against envelope decode + crypto Open
+make vet           # go vet ./...
+make fmt           # gofmt -w .
+make lint          # golangci-lint run
+make ci            # everything CI runs
 ```
 
 Each non-Go subtree (when added) gets its own build commands; the
@@ -116,8 +129,17 @@ top-level Makefile delegates to per-subtree Makefiles.
 
 ## Security defaults
 
-- TLS 1.3 minimum on the client transport.
-- AES-256-GCM authenticated encryption on every batch.
+- TLS 1.3 minimum on **both** transports (`https` and `appsscript`).
+- AES-256-GCM authenticated encryption on every batch, with **per-client
+  HKDF-derived keys** (a leaked derived key compromises only that
+  client, not the whole fleet).
+- **AAD-bound `client_id`** in the wire envelope — a captured packet
+  posted with a swapped cleartext id fails authentication.
+- **Replay protection** — inner timestamp + 16-byte replay-id, with a
+  server-side dedup ring buffer (10-min TTL) and `RATE_PRESSURE`
+  fail-closed under eviction pressure.
+- **Per-IP rate limit on `/tunnel`** (50 req/s, burst 100) layered on
+  top of per-client session caps.
 - Server SSRF guard rejects private/loopback/link-local/multicast/cloud-metadata IPs.
 - Per-client session cap (default 100) and idle-session reaper (default 10 min).
 - Admin auth rate-limit (8 failures / 5 min / IP).

@@ -13,7 +13,40 @@ delivers traffic that looks like ordinary Google Apps Script traffic to a
 network observer) and bumps the wire envelope to v1.1 with per-client key
 derivation, AAD-bound client_id, timestamp + replay-id, and a server-side
 replay store. **Hard-cut from v1.0**; previously sealed envelopes do not
-interoperate.
+interoperate. Also closes the Phase 1 success condition: an operator can
+now prepare a single bundle for an Android end-user and the user runs it
+in Termux with NekoBox / v2rayNG.
+
+### Added — Phase 1 finish (Android-via-Termux + minimal client control)
+
+- **`make build-android`** — cross-compile `beacongate-client` for
+  `linux/arm64` (Termux on Android). `CGO_ENABLED=0`, `-trimpath`,
+  `-ldflags="-s -w"` for a small, static, path-stripped binary.
+- **`ops/prepare-bundle.sh`** — operator-bundle script. Validates the
+  config (via `beacongate-client -validate-only`), packages binary +
+  config + README + `verify.sh` into a `.zip`, prints the SHA-256.
+- **`beacongate-client -validate-only`** — load + validate the config,
+  print structured JSON, exit 0/1. Used by `prepare-bundle.sh` and
+  `verify.sh`.
+- **Phase-1 client control endpoints** (`client/control`):
+  - `GET /api/status` now returns the full STEP-2 status model
+    (`state` enum, listen address, transport type, transport health,
+    probe OK, last successful probe, last error, active profile).
+  - `GET /api/events` — capped (256-entry) ring buffer of structured
+    runtime events, exposed as JSON.
+  - `POST /api/validate` — re-validates the loaded config + runs a
+    probe round-trip. ~30 lines, no profile store; useful for the
+    bundled phone-side `verify.sh`.
+- **`docs/android-termux.md`** — end-user setup walkthrough (F-Droid
+  Termux, `termux-wake-lock` + `Termux:Boot`, NekoBox Remote-DNS-over-
+  SOCKS, IPv4-only).
+- **`docs/operator-handoff-checklist.md`** — pre-flight before the
+  operator sends a bundle (server reachable from a fresh network,
+  policy doesn't block the friend's destinations, SHA-256 logged
+  out-of-band).
+- **`docs/troubleshooting.md`** — full operator runbook covering
+  symptoms, first-response commands, AEAD key rotation, and per-
+  failure-mode diagnostics for both transports.
 
 ### Added
 

@@ -241,11 +241,11 @@ flow. Short version:
 1. Open <https://script.google.com/> and create a new project.
 2. Replace the default `Code.gs` with the contents of
    [apps_script/Code.gs](../apps_script/Code.gs).
-3. **Edit line 26** of the script:
+3. **Edit the `RELAY_URL` constant** near the top of the script:
    ```javascript
    const RELAY_URL = 'http://YOUR.VPS.IP:8080/tunnel';
    ```
-   with your actual VPS URL.
+   Replace `YOUR.VPS.IP:8080` with your actual VPS host:port.
 4. Deploy → New deployment → type **Web app** → Execute as **Me** →
    Who has access **Anyone** → click **Deploy**.
 5. On first deploy Google asks you to authorize the script (it needs
@@ -380,6 +380,9 @@ the updated rules without restarting the server.
 
 ## Recovery (both playbooks)
 
+For an exhaustive runbook with first-response commands per failure
+mode, see [troubleshooting.md](troubleshooting.md). Quick reference:
+
 | Symptom | First step |
 | --- | --- |
 | `auth failed` (HTTP 401) on `/tunnel` | Server and client AEAD keys diverged. Regenerate and roll. |
@@ -389,3 +392,23 @@ the updated rules without restarting the server.
 | `RESET POLICY_DENIED` for legitimate target | Add an explicit allow rule above the matching block. |
 | Server refuses to start | `journalctl -u beacongate-server` for systemd, `docker compose logs` for Docker. |
 | All deployments quota-blacklisted (appsscript mode) | Wait until midnight Pacific, or add more entries to `script_keys` from additional Google accounts. |
+
+## Handing the client to an Android end-user
+
+Phase 1 does not ship a native APK. The intended flow is: cross-compile
+the client for `linux/arm64`, package a bundle for the friend, and
+have them run the binary in [Termux](https://termux.dev) with NekoBox
+or v2rayNG consuming the local SOCKS5 listener.
+
+```sh
+make build-android
+ops/prepare-bundle.sh \
+  --binary bin/beacongate-client-android-arm64 \
+  --config client_config.json \
+  --vps-ip $(curl -fsS https://api.ipify.org) \
+  --out /tmp/beacongate-bundle.zip
+```
+
+The full operator-side procedure is in
+[operator-handoff-checklist.md](operator-handoff-checklist.md); the
+end-user setup is in [android-termux.md](android-termux.md).

@@ -1,6 +1,19 @@
 // Package control exposes a local HTTP API on the client process for
 // desktop, CLI, and automation consumers. It is loopback-only by design
 // so the engine never depends on a network-facing trust decision.
+//
+// Phase 1 surface (per STEP-2-control-api §"Minimum Control Surface",
+// scoped to the strict Phase-1 subset — no lifecycle or profile CRUD):
+//
+//   - GET  /api/status     full status model (state, transport, probe, last error)
+//   - GET  /api/health     coarse transport health (used by external probes)
+//   - GET  /api/diagnose   full startup diagnostics (transport + probe round-trip)
+//   - GET  /api/events     recent structured events (ring buffer, capped)
+//   - POST /api/validate   re-validate the currently loaded config + run a probe
+//
+// Lifecycle (connect/disconnect) and profile CRUD are deferred to a
+// future desktop wrapper — Phase 1 process model is one-shot
+// (`./beacongate-client` foreground or under systemd / Termux).
 package control
 
 import (
@@ -14,16 +27,28 @@ import (
 )
 
 type API struct {
-	rt *runtime.Runtime
+	rt     *runtime.Runtime
+	events *EventSink
 }
 
-func New(rt *runtime.Runtime) *API { return &API{rt: rt} }
+// New builds a control API with default options (256-entry event ring).
+func New(rt *runtime.Runtime) *API {
+	return &API{rt: rt, events: NewEventSink(256)}
+}
+
+// Events returns the API's event sink. Runtime callers (the pump,
+// startup diagnostics) record into this sink in parallel with their
+// existing slog logging — events are a separate, structured surface,
+// not a replacement for logs.
+func (a *API) Events() *EventSink { return a.events }
 
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", a.handleStatus)
 	mux.HandleFunc("/api/health", a.handleHealth)
 	mux.HandleFunc("/api/diagnose", a.handleDiagnose)
+	mux.HandleFunc("/api/events", a.handleEvents)
+	mux.HandleFunc("/api/validate", a.handleValidate)
 	return loopbackOnly(mux)
 }
 
