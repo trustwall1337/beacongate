@@ -300,45 +300,37 @@ func (p *Pump) reconnectBackoff() time.Duration {
 
 // Dial opens a new session against target. The returned ClientSession can be
 // used as a bidirectional byte stream until Close.
-//
-// OPEN is NOT enqueued here. It is held on the session as openPending and
-// emitted by the first session.Write or session.Close call (batched with
-// that call's DATA / CLOSE message into a single outbound POST), or — in
-// the degenerate "open and never use" case — by a 1 s safety timer.
-//
-// Why deferred: the outbound worker fires its POST as soon as the outbox
-// is non-empty. If Dial appended OPEN immediately, the worker would ship
-// OPEN alone and pay one full Apps Script round-trip (~2 s) before the
-// caller's first byte even gets the chance to ride the same POST. On
-// HTTPS, where curl's TLS init delays the first ClientHello by 50–500 ms,
-// that's two sequential round-trips for a single logical handshake leg.
-// Holding OPEN on the session collapses it into one round-trip per leg.
-//
-// The 1 s safety timer covers the degenerate path. The v1.0 attempt used
-// a 50 ms timer and was reverted because curl-with-TLS often takes longer
-// than 50 ms to generate its first ClientHello — the timer fired
-// prematurely, shipped OPEN alone, and the upstream's TLS server closed
-// its idle socket before DATA arrived. 1 s is well above curl's typical
-// init time and well below the 10–15 s upstream idle timeout.
 func (p *Pump) Dial(target protocol.Target) (*ClientSession, error) {
 	id, err := p.rt.NewID("sess")
 	if err != nil {
 		return nil, err
 	}
 	s := &ClientSession{
-		id:          id,
-		pump:        p,
-		target:      target,
-		inbox:       make(chan []byte, p.inboxCap),
-		closed:      make(chan struct{}),
-		openPending: true,
+		id:     id,
+		pump:   p,
+		inbox:  make(chan []byte, p.inboxCap),
+		closed: make(chan struct{}),
 	}
 	p.mu.Lock()
 	p.sessions[id] = s
+	p.outbox = append(p.outbox, protocol.Message{
+		Type:      protocol.MessageTypeOpen,
+		SessionID: id,
+		Target:    &target,
+	})
 	p.mu.Unlock()
-	s.mu.Lock()
-	s.openSafetyTimer = time.AfterFunc(time.Second, s.flushOpenIfPending)
-	s.mu.Unlock()
+	// Flush OPEN immediately. We previously tried buffering OPEN for
+	// 50 ms hoping the SOCKS layer's first Write would coalesce
+	// OPEN+DATA into one POST, but real-world testing showed that
+	// curl-with-TLS often takes longer than 50 ms to generate its
+	// first ClientHello — the safety timer then ships OPEN alone,
+	// the server dials the upstream, and the upstream's TLS server
+	// (e.g. api.ipify.org) closes the idle TCP connection at its own
+	// timeout (~15 s) before DATA ever arrives. The latency win this
+	// buffer was meant to capture is delivered more robustly by the
+	// server-side active-drain window (see SetActiveDrainWindow), so
+	// keep this path simple and ship OPEN as soon as it is queued.
+	p.signalFlush()
 	p.rt.Log().Info("session.open",
 		"session_id", id,
 		"target", net.JoinHostPort(target.Host, fmt.Sprintf("%d", target.Port)))
@@ -797,7 +789,6 @@ func (p *Pump) recvReset(id, code, reason string) {
 type ClientSession struct {
 	id     string
 	pump   *Pump
-	target protocol.Target
 	inbox  chan []byte
 	closed chan struct{}
 
@@ -808,17 +799,6 @@ type ClientSession struct {
 	err          error
 
 	readBuf []byte
-
-	// openPending is true between Dial and the first Write/Close (or
-	// safety-timer fire). While set, the OPEN message has not yet been
-	// enqueued — it is emitted atomically with the first Write/Close to
-	// fuse the OPEN+first-DATA POST into a single Apps Script round-
-	// trip. Protected by mu.
-	openPending bool
-	// openSafetyTimer fires after 1 s post-Dial if the user hasn't
-	// written or closed. Held on the session so any code path
-	// (Write, Close, terminate, the timer itself) can Stop it cleanly.
-	openSafetyTimer *time.Timer
 
 	// Receive-side reordering state. With concurrent POSTs (outbound
 	// + idle worker), the server's send-seq order is preserved across
@@ -883,11 +863,6 @@ func (s *ClientSession) Write(b []byte) (int, error) {
 	}
 	s.mu.Unlock()
 
-	// consumeOpenPending atomically clears openPending and stops the
-	// safety timer; it returns the OPEN message that must lead the
-	// first batch (or nil if already consumed).
-	openMsg := s.consumeOpenPending()
-
 	written := 0
 	for len(b) > 0 {
 		chunk := b
@@ -899,56 +874,11 @@ func (s *ClientSession) Write(b []byte) (int, error) {
 		s.sendSeq++
 		s.mu.Unlock()
 		seqVal := seq
-		dataMsg := buildDataMessage(s.id, &seqVal, chunk)
-		// First chunk after Dial: ship OPEN and DATA in the SAME
-		// outbound batch so the pump fires one POST instead of two.
-		if openMsg != nil {
-			s.pump.enqueue(*openMsg, dataMsg)
-			openMsg = nil
-		} else {
-			s.pump.enqueue(dataMsg)
-		}
+		s.pump.enqueue(buildDataMessage(s.id, &seqVal, chunk))
 		written += len(chunk)
 		b = b[len(chunk):]
 	}
 	return written, nil
-}
-
-// consumeOpenPending atomically clears the openPending flag and stops
-// the safety timer. Returns the OPEN message the caller must lead the
-// next outbound batch with, or nil if OPEN was already emitted (by an
-// earlier Write/Close or by the timer itself).
-func (s *ClientSession) consumeOpenPending() *protocol.Message {
-	s.mu.Lock()
-	if !s.openPending {
-		s.mu.Unlock()
-		return nil
-	}
-	s.openPending = false
-	timer := s.openSafetyTimer
-	s.openSafetyTimer = nil
-	target := s.target
-	s.mu.Unlock()
-	if timer != nil {
-		timer.Stop()
-	}
-	return &protocol.Message{
-		Type:      protocol.MessageTypeOpen,
-		SessionID: s.id,
-		Target:    &target,
-	}
-}
-
-// flushOpenIfPending is the safety-timer callback. If the user hasn't
-// written or closed within the deadline, ship OPEN alone so the server
-// gets to dial the upstream eventually. The timer is auto-cancelled by
-// any earlier Write/Close via consumeOpenPending.
-func (s *ClientSession) flushOpenIfPending() {
-	openMsg := s.consumeOpenPending()
-	if openMsg == nil {
-		return
-	}
-	s.pump.enqueue(*openMsg)
 }
 
 // buildDataMessage emits a DATA message, gzip-compressing payloads that are
@@ -983,16 +913,7 @@ func (s *ClientSession) Close() error {
 	s.localClosed = true
 	terminate := s.remoteClosed
 	s.mu.Unlock()
-	// Close-without-Write also satisfies the OPEN-fusion trigger: ship
-	// [OPEN, CLOSE] in one POST so the server dials and immediately
-	// tears down in a single Apps Script round-trip.
-	openMsg := s.consumeOpenPending()
-	closeMsg := protocol.Message{Type: protocol.MessageTypeClose, SessionID: s.id}
-	if openMsg != nil {
-		s.pump.enqueue(*openMsg, closeMsg)
-	} else {
-		s.pump.enqueue(closeMsg)
-	}
+	s.pump.enqueue(protocol.Message{Type: protocol.MessageTypeClose, SessionID: s.id})
 	if terminate {
 		s.terminate(nil)
 	}
@@ -1006,15 +927,7 @@ func (s *ClientSession) terminate(err error) {
 	}
 	closeInbox := !s.remoteClosed
 	s.remoteClosed = true
-	timer := s.openSafetyTimer
-	s.openSafetyTimer = nil
 	s.mu.Unlock()
-	if timer != nil {
-		// Stop is a no-op if it already fired; either way, drop the
-		// reference so a churning fleet of short-lived sessions doesn't
-		// keep a goroutine per session for up to 1 s after termination.
-		timer.Stop()
-	}
 	if closeInbox {
 		close(s.inbox)
 	}
