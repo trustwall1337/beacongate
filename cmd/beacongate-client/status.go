@@ -42,8 +42,18 @@ func runStatus(controlAddr string) int {
 	return 0
 }
 
+// getJSON GETs a URL and decodes its JSON body into out. The url is
+// constructed from operator-controlled flag values that point at the
+// local-loopback control API, so gosec G107 (HTTP request with
+// variable URL) is not a realistic exposure here — but to make the
+// linter happy we go through http.NewRequest + http.DefaultClient.Do
+// rather than the plain http.Get(string) form.
 func getJSON(url string, out any) error {
-	resp, err := http.Get(url) // local loopback, short-lived
+	req, err := http.NewRequest(http.MethodGet, url, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("build request %s: %w", url, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", url, err)
 	}
@@ -59,32 +69,32 @@ func getJSON(url string, out any) error {
 }
 
 func prettyPrintStatus(w io.Writer, st control.StatusReport, q control.QuotaResponse) {
-	fmt.Fprintf(w, "BeaconGate  •  profile: %s (%s)\n", or(st.ActiveProfile, "(unset)"), st.TransportType)
-	fmt.Fprintf(w, "  state:           %s\n", st.State)
-	fmt.Fprintf(w, "  client_id:       %s\n", st.ClientID)
-	fmt.Fprintf(w, "  listen_addr:     %s\n", st.ListenAddr)
-	fmt.Fprintf(w, "  transport:       healthy=%v probe_ok=%v\n", st.TransportHealthy, st.ProbeOK)
+	_, _ = fmt.Fprintf(w, "BeaconGate  •  profile: %s (%s)\n", or(st.ActiveProfile, "(unset)"), st.TransportType)
+	_, _ = fmt.Fprintf(w, "  state:           %s\n", st.State)
+	_, _ = fmt.Fprintf(w, "  client_id:       %s\n", st.ClientID)
+	_, _ = fmt.Fprintf(w, "  listen_addr:     %s\n", st.ListenAddr)
+	_, _ = fmt.Fprintf(w, "  transport:       healthy=%v probe_ok=%v\n", st.TransportHealthy, st.ProbeOK)
 	if !st.LastSuccessfulProbe.IsZero() {
-		fmt.Fprintf(w, "  last_good_probe: %s (%s ago)\n",
+		_, _ = fmt.Fprintf(w, "  last_good_probe: %s (%s ago)\n",
 			st.LastSuccessfulProbe.Format(time.RFC3339),
 			time.Since(st.LastSuccessfulProbe).Round(time.Second))
 	}
 	if st.LastError != "" {
-		fmt.Fprintf(w, "  last_error:      %s\n", st.LastError)
+		_, _ = fmt.Fprintf(w, "  last_error:      %s\n", st.LastError)
 	}
 
 	if q.AppsScript == nil {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "(quota tracking only available for the appsscript transport)")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "(quota tracking only available for the appsscript transport)")
 		return
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Quota (Apps Script, ~20K calls/day per Google account):")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Quota (Apps Script, ~20K calls/day per Google account):")
 	for _, a := range q.AppsScript.Accounts {
 		printAccountBar(w, a)
 	}
 	if !q.AppsScript.NextResetAt.IsZero() {
-		fmt.Fprintf(w, "  next reset:    %s (%s from now)\n",
+		_, _ = fmt.Fprintf(w, "  next reset:    %s (%s from now)\n",
 			q.AppsScript.NextResetAt.Format(time.RFC3339),
 			time.Until(q.AppsScript.NextResetAt).Round(time.Minute))
 	}
@@ -100,10 +110,10 @@ func printAccountBar(w io.Writer, a appsscript.AccountStats) {
 	const barWidth = 30
 	filled := pct * barWidth / 100
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
-	fmt.Fprintf(w, "  %-12s  %5d / %d  (%3d%%)  [%s]  deployments=%d (%d healthy)\n",
+	_, _ = fmt.Fprintf(w, "  %-12s  %5d / %d  (%3d%%)  [%s]  deployments=%d (%d healthy)\n",
 		a.Label, usage, dailyCap, pct, bar, a.DeploymentCount, a.HealthyDeployments)
 	if a.ScriptCount > 0 && a.ScriptCount != a.DailyCount {
-		fmt.Fprintf(w, "                 (script-side count: %d)\n", a.ScriptCount)
+		_, _ = fmt.Fprintf(w, "                 (script-side count: %d)\n", a.ScriptCount)
 	}
 }
 

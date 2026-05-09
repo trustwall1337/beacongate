@@ -1,3 +1,6 @@
+// see envelope.go for rationale.
+//
+//nolint:revive // var-naming: package shadows stdlib "crypto" by design;
 package crypto
 
 import (

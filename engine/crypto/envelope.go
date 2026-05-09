@@ -26,6 +26,11 @@
 //
 // Hard-cut from v1.0: there is no v1.0 fallback. Any wire packet that
 // does not start with WireVersionV11 (0x01) is rejected.
+//
+// this is the BeaconGate AEAD-envelope wrapper imported as
+// engine/crypto. Renaming would touch every consumer.
+//
+//nolint:revive // var-naming: package shadows stdlib "crypto" by design;
 package crypto
 
 import (

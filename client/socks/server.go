@@ -178,10 +178,14 @@ func negotiateAuth(conn net.Conn, auth AuthConfig) error {
 	if _, err := io.ReadFull(conn, hdr); err != nil {
 		return err
 	}
-	if hdr[0] != socksVersion {
-		return fmt.Errorf("socks: bad version %d", hdr[0])
+	// gosec G602 false positives below: io.ReadFull returns nil only
+	// when the full 2 bytes were read, so hdr[0] and hdr[1] are
+	// guaranteed in-bounds. The linter can't follow ReadFull's
+	// post-condition.
+	if hdr[0] != socksVersion { //nolint:gosec // G602: hdr length proven by io.ReadFull above
+		return fmt.Errorf("socks: bad version %d", hdr[0]) //nolint:gosec // G602: same
 	}
-	methods := make([]byte, hdr[1])
+	methods := make([]byte, hdr[1]) //nolint:gosec // G602: same reasoning
 	if _, err := io.ReadFull(conn, methods); err != nil {
 		return err
 	}
@@ -263,12 +267,15 @@ func readRequest(conn net.Conn) (cmd byte, addr string, port uint16, err error) 
 	if _, err = io.ReadFull(conn, hdr); err != nil {
 		return
 	}
-	if hdr[0] != socksVersion {
-		err = fmt.Errorf("socks: bad version %d", hdr[0])
+	// gosec G602 false positives below: io.ReadFull returns nil only
+	// when the full 4 bytes were read, so hdr[0..3] are guaranteed
+	// in-bounds. The linter can't follow ReadFull's post-condition.
+	if hdr[0] != socksVersion { //nolint:gosec // G602: hdr length proven by io.ReadFull above
+		err = fmt.Errorf("socks: bad version %d", hdr[0]) //nolint:gosec // G602: same
 		return
 	}
-	cmd = hdr[1]
-	atyp := hdr[3]
+	cmd = hdr[1]   //nolint:gosec // G602: same reasoning
+	atyp := hdr[3] //nolint:gosec // G602: same reasoning
 	switch atyp {
 	case atypIPv4:
 		buf := make([]byte, 4)

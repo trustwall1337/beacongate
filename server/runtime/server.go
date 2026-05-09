@@ -190,7 +190,14 @@ func (s *Server) Close() error {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.reaperWG.Wait()
 	s.mu.Lock()
-	live := []*serverSession{}
+	// Pre-size live to the total session count so Close doesn't grow
+	// the slice when the server has many in-flight sessions at
+	// shutdown.
+	totalSessions := 0
+	for _, byID := range s.byClient {
+		totalSessions += len(byID)
+	}
+	live := make([]*serverSession, 0, totalSessions)
 	for _, byID := range s.byClient {
 		for _, sess := range byID {
 			live = append(live, sess)

@@ -170,14 +170,14 @@ func (p *Pump) recordErr(err error) {
 	fails := p.consecutiveFails
 	p.errMu.Unlock()
 	p.rt.RecordError(err.Error())
-	switch {
-	case fails == degradedAfterFails:
+	switch fails {
+	case degradedAfterFails:
 		p.rt.SetState(StateDegraded)
 		p.rt.Log().Warn("pump.degraded", "consecutive_failures", fails)
 		p.rt.RecordEvent("warn", "runtime", "degraded",
 			"3 consecutive transport failures",
 			err.Error())
-	case fails == reconnectingAfterFails:
+	case reconnectingAfterFails: //nolint:exhaustive // only the two threshold values are interesting
 		p.rt.SetState(StateError) // visible as "error" externally; internal flag below drives backoff
 		p.errMu.Lock()
 		p.reconnecting = true

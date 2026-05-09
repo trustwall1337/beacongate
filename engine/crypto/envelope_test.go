@@ -1,3 +1,8 @@
+// it lives at engine/crypto to mirror Go's package layout convention
+// and is imported as the local AEAD wrapper, never alongside stdlib
+// crypto. Renaming would touch every consumer.
+//
+//nolint:revive // var-naming: package shadows stdlib "crypto" by design;
 package crypto
 
 import (
