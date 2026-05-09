@@ -17,6 +17,78 @@ interoperate. Also closes the Phase 1 success condition: an operator can
 now prepare a single bundle for an Android end-user and the user runs it
 in Termux with NekoBox / v2rayNG.
 
+### Added — v1.1.0 end-user-experience parity with Goose
+
+This batch is the "usable v1, not POC" workstream. Eight items
+shipped that close end-user-experience gaps where BeaconGate
+previously felt slower or more friction-heavy than V2RayNG /
+GooseRelayVPN / similar tools the friend on the phone is comparing
+against.
+
+- **`bg://` share-link + QR-code import** — operator runs
+  `beacongate-admin export-link --config client.json --qr` (or
+  `--qr-png file.png`); friend pastes/scans and runs
+  `beacongate-client -import "<bg://...>"`. Setup goes from 10
+  minutes of JSON editing to under 30 seconds. Sensitive-data
+  warning printed every export.
+- **Multi-profile CLI** —
+  `${XDG_CONFIG_HOME}/beacongate/profiles/<name>.json`.
+  `beacongate-client -profile work` vs `-profile home`.
+  `-list-profiles` enumerates. Strict name validation blocks path
+  traversal.
+- **Account-bucket-aware endpoint selection** — `script_keys`'s
+  `account` labels now drive selection: `pick()` rotates buckets
+  first (so quota draw spreads across operator Google accounts),
+  `pickFallback()` prefers same-bucket alternates before crossing
+  accounts. Honest scope: this is the *selection* half. Goose's full
+  N-workers-per-bucket parallelism (and the matching
+  `idle_slots_per_bucket` knob) needs a Pump-level concurrency
+  refactor and lands in v1.2.
+- **`coalesce_step_ms` adaptive uplink coalescing** — pump TX
+  defers up to N ms (default 0 = off; recommended 20–40) for more
+  outbound frames, collapsing interactive bursts (SSH typing, REST
+  polling) into single HTTP POSTs. ~80% fewer POSTs for SSH-style
+  workloads. Safety cap = 5×window.
+- **`upstream_proxy` (Cloudflare WARP integration)** —
+  `socks5://127.0.0.1:40000` routes outbound through a local SOCKS5
+  proxy. Cloudflare-protected sites stop showing captchas because
+  destinations see the WARP egress IP, not the VPS's datacenter IP.
+  SSRF guard still runs locally on the resolved IP.
+- **Per-account quota endpoint + `-status` pretty-print** —
+  `GET /api/quota` returns aggregated per-Google-account quota usage.
+  `beacongate-client -status -control-addr 127.0.0.1:9091` prints
+  human-readable usage bars ("alpha: 8431/20000 (42%)
+  [█████╸━━━━━━] deployments=2 (2 healthy)"). Live-refresh TUI
+  deferred to v1.1.1.
+- **Auto-reconnect + state machine** — Pump tracks consecutive
+  failures: 3 → state=Degraded; 5+ → state=Error and exponential
+  backoff (3s/6s/12s/24s/30s cap). Successful tick clears counters
+  and emits a `pump.reconnected` event. Tunnel survives transient
+  5xx and longer outages without manual restart. Network-change
+  watcher (Linux /proc/net/route) deferred to v1.2.
+- **`socks_user`/`socks_pass` documentation** — already worked but
+  was undocumented; README + deployment.md now cover it with a
+  "set-it-when-binding-non-loopback" warning.
+- **`preflight.ok` log line** — single human-readable smoke
+  signal at startup ("relay healthy, AES key matches end-to-end")
+  instead of split-across-multiple-slog-events.
+
+### Honest deferrals (named so they don't slip)
+
+- **`idle_slots_per_bucket` knob** — deferred to v1.2. Needs
+  per-bucket worker pool (Pump-level concurrency refactor). v1.1.0's
+  bucket-aware selection improves quota distribution but the carrier
+  is still single-Roundtrip-at-a-time.
+- **Zstd batch-level compression** — deferred to v1.1.1. Needs
+  PROBE-based capability negotiation + bidirectional fallback tests
+  for safe roll-out. v1.1.0 keeps per-message gzip ≥256B; the
+  ~3× quota-economy gap vs Goose is partially mitigated by
+  `coalesce_step_ms` (above), which cuts SSH-style POST counts by
+  ~80%.
+- **Live-refresh quota TUI** — deferred to v1.1.1. v1.1.0 ships
+  one-shot `--status` only.
+- **Linux network-change watcher** — deferred to v1.2.
+
 ### Added — v1.1.0 release-readiness (operator UX + supply-chain integrity)
 
 - **uTLS Chrome 131 ClientHello fingerprinting** in the `appsscript`
