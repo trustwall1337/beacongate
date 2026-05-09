@@ -17,13 +17,12 @@ interoperate. Also closes the Phase 1 success condition: an operator can
 now prepare a single bundle for an Android end-user and the user runs it
 in Termux with NekoBox / v2rayNG.
 
-### Added — v1.1.0 end-user-experience parity with Goose
+### Added — v1.1.0 end-user-experience polish
 
 This batch is the "usable v1, not POC" workstream. Eight items
-shipped that close end-user-experience gaps where BeaconGate
-previously felt slower or more friction-heavy than V2RayNG /
-GooseRelayVPN / similar tools the friend on the phone is comparing
-against.
+shipped that close end-user-experience gaps so the friend on the
+phone using BeaconGate every day doesn't feel friction during
+setup or during sustained use.
 
 - **`bg://` share-link + QR-code import** — operator runs
   `beacongate-admin export-link --config client.json --qr` (or
@@ -40,10 +39,10 @@ against.
   `account` labels now drive selection: `pick()` rotates buckets
   first (so quota draw spreads across operator Google accounts),
   `pickFallback()` prefers same-bucket alternates before crossing
-  accounts. Honest scope: this is the *selection* half. Goose's full
-  N-workers-per-bucket parallelism (and the matching
-  `idle_slots_per_bucket` knob) needs a Pump-level concurrency
-  refactor and lands in v1.2.
+  accounts. Honest scope: this is the *selection* half. True
+  per-bucket worker parallelism (matching Apps Script's per-account
+  concurrency cap) and the matching `idle_slots_per_bucket` knob
+  need a Pump-level concurrency refactor and land in v1.2.
 - **`coalesce_step_ms` adaptive uplink coalescing** — pump TX
   defers up to N ms (default 0 = off; recommended 20–40) for more
   outbound frames, collapsing interactive bursts (SSH typing, REST
@@ -81,10 +80,9 @@ against.
   is still single-Roundtrip-at-a-time.
 - **Zstd batch-level compression** — deferred to v1.1.1. Needs
   PROBE-based capability negotiation + bidirectional fallback tests
-  for safe roll-out. v1.1.0 keeps per-message gzip ≥256B; the
-  ~3× quota-economy gap vs Goose is partially mitigated by
-  `coalesce_step_ms` (above), which cuts SSH-style POST counts by
-  ~80%.
+  for safe roll-out. v1.1.0 keeps per-message gzip ≥256B for
+  payloads; `coalesce_step_ms` (above) is the v1.1.0 quota-economy
+  lever, cutting SSH-style POST counts by ~80%.
 - **Live-refresh quota TUI** — deferred to v1.1.1. v1.1.0 ships
   one-shot `--status` only.
 - **Linux network-change watcher** — deferred to v1.2.
@@ -92,12 +90,14 @@ against.
 ### Added — v1.1.0 release-readiness (operator UX + supply-chain integrity)
 
 - **uTLS Chrome 131 ClientHello fingerprinting** in the `appsscript`
-  transport (`engine/transport/appsscript/utls_dial.go`). Defeats
-  JA3/JA4-fingerprinting at the wire layer — every comparable
-  project (Goose, MasterHttpRelayVPN) leaves this unfixed. Library
-  pinned to `github.com/refraction-networking/utls v1.8.2`; profile
-  pinned to `HelloChrome_131` (deterministic, not `_Auto`). Bump
-  cadence in [`docs/uTLS-fingerprint-cadence.md`](docs/uTLS-fingerprint-cadence.md):
+  transport (`engine/transport/appsscript/utls_dial.go`). Mimics a
+  Chrome 131 ClientHello on the wire, reducing naive JA3/JA4
+  distinguishability — this is not a guarantee against active
+  probing, traffic analysis, Google-side classification, or future
+  fingerprinting methods. Library pinned to
+  `github.com/refraction-networking/utls v1.8.2`; profile pinned to
+  `HelloChrome_131` (deterministic, not `_Auto`). Bump cadence in
+  [`docs/uTLS-fingerprint-cadence.md`](docs/uTLS-fingerprint-cadence.md):
   one Chrome major per BeaconGate minor.
 - **Tag-driven release pipeline** at
   [`.github/workflows/release.yml`](.github/workflows/release.yml).
@@ -116,7 +116,7 @@ against.
   builds in CI — local dry-run support without pushing a tag.
 - **`script_keys` accepts both shapes**
   (`engine/config/script_keys.go`): legacy comma-separated string
-  AND Goose-natural array-of-objects
+  AND structured array-of-objects
   `[{"id":"...","account":"..."}]`. Backward compatible.
   `migrate-config` rewrites string → array form.
 - **README rewrite** — operator-first structure. Tagline leads with

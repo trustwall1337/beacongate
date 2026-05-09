@@ -143,8 +143,9 @@ func newFrontedClient(googleIP, sniHost string, requestTimeout time.Duration, se
 		},
 		// Idle ping: a black-holed h2 connection would otherwise linger
 		// until the kernel TCP keepalive fires (~2 hours by default),
-		// stalling in-flight requests. 30s ping timeout matches Goose's
-		// tuning.
+		// stalling in-flight requests. 30s ReadIdleTimeout + 15s
+		// PingTimeout is conservative enough to survive momentary
+		// network blips without false-positive disconnects.
 		ReadIdleTimeout: 30 * time.Second,
 		PingTimeout:     15 * time.Second,
 		// Raise the max DATA frame size from the spec default 16 KiB to

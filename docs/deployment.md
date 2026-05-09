@@ -487,9 +487,10 @@ rejected at config-load time.
   The server resolves the hostname and validates the IP before
   handing the dial to the proxy. A compromised client cannot use
   the proxy to bypass our private/loopback/metadata block list.
-- **DNS-via-proxy is NOT preserved.** Goose's docs claim DNS goes
-  through the proxy too; ours doesn't (we resolve locally for SSRF
-  enforcement). The user-visible Cloudflare-egress-IP property holds
+- **DNS-via-proxy is NOT preserved.** BeaconGate resolves the
+  destination hostname locally so the SSRF guard can run on the
+  resolved IP before the dial; the proxy hop only carries the TCP
+  connection. The user-visible Cloudflare-egress-IP property holds
   for TCP, but DNS leaks through the VPS's resolver. If DNS-leak
   protection matters, set the VPS resolver to a privacy-friendly
   service (`1.1.1.1`, `9.9.9.9`).

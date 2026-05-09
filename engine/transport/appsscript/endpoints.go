@@ -71,10 +71,11 @@ const (
 // bucket A has no other live deployment.
 //
 // What v1.1.0 does NOT do: spawn N parallel poll workers per bucket
-// (Goose's 4-workers-per-account model). The carrier above this pool
-// remains single-Roundtrip; bucket-aware selection improves quota
-// distribution without changing the in-flight request count. True
-// per-bucket worker parallelism is v1.2 follow-up work.
+// (Apps Script's per-account concurrency cap permits ~4 in-flight
+// requests; matching that with parallel workers is a v1.2 follow-up).
+// The carrier above this pool remains single-Roundtrip; bucket-aware
+// selection improves quota distribution without changing the
+// in-flight request count.
 type endpointPool struct {
 	mu  sync.Mutex
 	eps []relayEndpoint

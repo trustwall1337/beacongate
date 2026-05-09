@@ -55,16 +55,14 @@ Allocs and throughput are stable between runs; time-per-op varies
   measured separately in `engine/crypto`'s tests when run with
   `-bench`).
 
-## Compared to Goose
+## End-to-end measurement procedure
 
-GooseRelayVPN's `bench/{harness,sink,diff}/` is a richer ~1K-LOC
-standalone harness that measures end-to-end through real frame
-encoding + crypto + zstd compression. BeaconGate intentionally
-chose a lighter `testing.B`-based approach: idiomatic Go,
-reproducible in CI, but less fidelity to real-world numbers.
+The in-process `testing.B` benchmarks above measure
+BeaconGate-internal cost only — useful for catching internal
+regressions, not a substitute for real-world latency numbers.
 
-When the operator needs end-to-end numbers (e.g. A7 #13 Goose-
-parity check), the procedure is to:
+When the operator needs end-to-end numbers (e.g. A7 #13 latency
+budget verification), the procedure is to:
 
 1. Stand up a real Apps Script deployment per
    [apps_script/README.md](../apps_script/README.md).
@@ -72,5 +70,6 @@ parity check), the procedure is to:
 3. Drive traffic through the SOCKS bridge.
 4. Compute p50/p95 from the timing logs.
 
-Goose's harness can be run side-by-side against the same Apps Script
-endpoint for direct parity comparison.
+A standalone end-to-end harness with committed baselines and
+side-by-side regression comparison is a v1.3.0 candidate (see
+the v1.1.x post-release plan).

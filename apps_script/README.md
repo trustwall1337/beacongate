@@ -8,10 +8,14 @@ the script forwards them as binary to your BeaconGate VPS server.
 
 ## Why this script does base64 (and why we DON'T want to "simplify" it)
 
-A naive forwarder would `e.postData.contents` → `UrlFetchApp.fetch`
-verbatim. That's how GooseRelayVPN's Code.gs works.
+A naive forwarder would pass `e.postData.contents` straight into
+`UrlFetchApp.fetch` and similarly forward the response verbatim.
+That works only when the BeaconGate server speaks the same
+text-shaped wire as Apps Script.
 
-BeaconGate's design is different on purpose:
+BeaconGate's design deliberately keeps the VPS server binary-only
+across both transports, so the Apps Script side does the
+text↔binary boundary itself:
 
 - The **BeaconGate VPS server stays binary-only** for both transports
   (`https` and `appsscript`). The server has no transport awareness;

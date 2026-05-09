@@ -194,10 +194,10 @@ func (c *Client) recordScriptStatsLocked(idx int, body []byte) {
 	}
 	ep := &c.pool.eps[idx]
 	if err := json.Unmarshal(trimmed, &stats); err != nil || !stats.OK {
-		// Likely the deployed Code.gs is the legacy/Goose version
-		// that doesn't return JSON. Set the once-flag so we don't log
-		// repeatedly. The transport stays healthy — operator just
-		// loses the per-deployment stats line.
+		// Likely the deployed Code.gs is a pre-v1.1 version that
+		// doesn't return JSON from doGet. Set the once-flag so we
+		// don't log repeatedly. The transport stays healthy — the
+		// operator just loses the per-deployment stats line.
 		ep.scriptStatsErrLogged = true
 		return
 	}

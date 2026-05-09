@@ -51,8 +51,8 @@ type ClientServerConfig struct {
 // is a breaking source-level API change for anyone vendoring this
 // package; end-user JSON configs are backward compatible (a JSON
 // string-valued option still parses correctly). The change is needed
-// to support `script_keys` in the Goose-natural array-of-objects
-// shape: `[{"id": "...", "account": "..."}]`. See
+// to support `script_keys` in the structured array-of-objects shape:
+// `[{"id": "...", "account": "..."}]`. See
 // engine/config/script_keys.go for the parser.
 //
 // Use the OptionString helper for string-valued options to get the
@@ -107,7 +107,7 @@ func (c *ClientConfig) Validate() error {
 			return fmt.Errorf("%w: server.url must be empty for transport.type=\"appsscript\" (the script URL is built from transport.options.script_keys; got %q)", ErrInvalidConfig, c.Server.URL)
 		}
 		// script_keys can be either a comma-separated string (legacy)
-		// or an array of strings/objects (Goose-natural). ParseScriptKeys
+		// or a structured array of strings/objects. ParseScriptKeys
 		// normalizes both. Empty (nil, "", or []) is rejected here because
 		// appsscript mode requires at least one deployment.
 		keys, err := ParseScriptKeys(c.Transport.Options["script_keys"])

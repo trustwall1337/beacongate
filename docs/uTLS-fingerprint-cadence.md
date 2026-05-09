@@ -1,13 +1,24 @@
 # uTLS Fingerprint — Pin & Bump Cadence
 
 BeaconGate's `appsscript` transport uses
-[uTLS](https://github.com/refraction-networking/utls) to make its TLS
-ClientHello byte-identical to a real Chrome browser. Without uTLS, the
-handshake fingerprints as "Go" via JA3/JA4 — a passive DPI box can
-flag and block traffic on that signal alone, even though the wire path
-ends at a real Google IP with `SNI=www.google.com`.
+[uTLS](https://github.com/refraction-networking/utls) to mimic a
+real Chrome browser's TLS ClientHello on the wire, reducing naive
+JA3/JA4 distinguishability. Without uTLS, the handshake
+fingerprints as "Go" via JA3/JA4 — a passive DPI box can flag and
+block traffic on that signal alone, even though the wire path ends
+at a real Google IP with `SNI=www.google.com`.
 
-This document is the contract for keeping the fingerprint current.
+**Important caveats — uTLS is not a complete defense.** It addresses
+the static ClientHello fingerprint only. It does NOT defend against
+active probing (a censor connecting to `script.google.com/macros/...`
+paths to verify response shape), traffic-pattern analysis (long-poll
+cadence, payload-size distribution, per-batch timing), Google-side
+classifiers running on Apps Script itself, or future fingerprinting
+methods that look at properties beyond the ClientHello. Treat uTLS
+as one layer among several, not as a unblockability guarantee.
+
+This document is the contract for keeping the ClientHello fingerprint
+current.
 
 ## Current pin
 

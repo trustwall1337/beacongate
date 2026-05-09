@@ -1,14 +1,18 @@
 # BeaconGate
 
-**BeaconGate** routes your traffic through Google so a network observer
+**BeaconGate** is a security-conscious, transport-agnostic SOCKS5
+tunnel that routes your traffic through Google so a network observer
 in a censored country only sees TLS to a Google IP. Bytes are
-AES-256-GCM sealed end-to-end with per-client keys; Google never holds
-the key and never sees plaintext. The TLS handshake itself uses
-[uTLS](https://github.com/refraction-networking/utls) to byte-match a
-real Chrome browser, defeating JA3/JA4 fingerprinting. Inspired by
-[GooseRelayVPN](https://github.com/kianmhz/GooseRelayVPN), redesigned
-around a transport-agnostic engine with replay protection, per-client
-key derivation, and a server-side outbound policy engine.
+AES-256-GCM sealed end-to-end with per-client HKDF-derived keys;
+Google never holds the key and never sees plaintext. The TLS
+handshake itself uses
+[uTLS](https://github.com/refraction-networking/utls) to mimic a
+Chrome 131 ClientHello, reducing naive JA3/JA4 distinguishability —
+this is not a guarantee against active probing, traffic analysis,
+Google-side classification, or future fingerprinting methods.
+Built on a transport-agnostic engine with replay protection,
+AAD-bound client identity, and server-side outbound policy
+enforcement.
 
 ---
 
@@ -158,8 +162,8 @@ live in this repo:
 - [client_config.example.json](client_config.example.json) — `https` mode
 - [client_config.appsscript.example.json](client_config.appsscript.example.json) — `appsscript` mode
 
-`script_keys` accepts both shapes (Goose-natural array OR legacy
-comma-separated string):
+`script_keys` accepts both shapes (the structured array-of-objects
+form, or a legacy comma-separated string):
 
 ```json
 "script_keys": [
@@ -274,8 +278,11 @@ account. Multi-deployment failover is the answer:
 ## Security defaults
 
 - **TLS 1.3 minimum** on both transports (`https` and `appsscript`).
-- **uTLS Chrome 131 ClientHello** on `appsscript` — defeats JA3/JA4
-  fingerprinting. Pin tracked in
+- **uTLS Chrome 131 ClientHello** on `appsscript` — mimics a real
+  Chrome browser's handshake to reduce naive JA3/JA4
+  distinguishability. **Not a guarantee against active probing,
+  traffic analysis, Google-side classification, or future
+  fingerprinting methods.** Pin tracked in
   [docs/uTLS-fingerprint-cadence.md](docs/uTLS-fingerprint-cadence.md).
 - **AES-256-GCM authenticated encryption** on every batch, with
   **per-client HKDF-derived keys** (a leaked derived key compromises
@@ -342,7 +349,6 @@ PRs especially welcome for:
 - **The `appsscript` transport is best-effort, not provably
   unblockable.** Re-read [⚠️ What this is NOT](#️-what-this-is-not)
   above. Don't sell users on a property the system doesn't deliver.
-- **Inspired by [GooseRelayVPN](https://github.com/kianmhz/GooseRelayVPN).**
   Different design (transport-agnostic engine, server-side policy,
   per-client keys, replay protection, uTLS), same operator-friendly
   spirit.

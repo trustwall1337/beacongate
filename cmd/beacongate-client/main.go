@@ -216,7 +216,7 @@ func buildHTTPSTransport(cfg *config.ClientConfig) (transport.ClientTransport, e
 //
 // **`script_keys` accepts both shapes** (per v1.1.0 schema flex):
 //   - legacy comma-separated string: "ID1,ID2"
-//   - Goose-natural array-of-objects: [{"id":"ID1","account":"alpha"}, ...]
+//   - structured array-of-objects: [{"id":"ID1","account":"alpha"}, ...]
 //
 // `script_accounts` is the parallel labels list (legacy comma-separated
 // string only); when `script_keys` uses the object form, account labels

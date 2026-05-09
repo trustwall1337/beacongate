@@ -429,7 +429,7 @@ not change the 1.1 wire format defined above:
   not just isolate keys. Stronger but adds complexity. Park.
 - **Binary inner envelope.** The JSON envelope inside the AEAD is heavy
   on chatty traffic; a future bump could replace it with a tighter
-  binary frame (matching Goose's wire density). Independent of the
+  binary frame for higher wire density. Independent of the
   outer-envelope wire-version byte.
 
 ## Implementation Traceability

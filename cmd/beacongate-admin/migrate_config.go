@@ -99,7 +99,7 @@ func applyMigrations(raw map[string]any) []string {
 
 	// Migration 2: transport.options.script_keys comma-separated string
 	// → array-of-objects. The string form still works (loader accepts
-	// both), but the array shape is the canonical Goose-natural form
+	// both), but the array shape is the canonical structured form
 	// going forward. Also migrate parallel script_accounts (legacy
 	// comma-separated string) into per-entry account labels.
 	if opts, ok := transport["options"].(map[string]any); ok {
@@ -116,7 +116,7 @@ func applyMigrations(raw map[string]any) []string {
 			}
 			opts["script_keys"] = arr
 			changes = append(changes,
-				`transport.options.script_keys: "ID1,ID2" → [{"id":"ID1"},{"id":"ID2"}] (Goose-natural shape; legacy string still accepted)`)
+				`transport.options.script_keys: "ID1,ID2" → [{"id":"ID1"},{"id":"ID2"}] (structured shape; legacy string still accepted)`)
 			if _, hadAccounts := opts["script_accounts"]; hadAccounts {
 				delete(opts, "script_accounts")
 				changes = append(changes, `transport.options.script_accounts: removed (folded into script_keys[*].account)`)

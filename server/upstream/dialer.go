@@ -31,11 +31,11 @@ type NetDialer struct {
 	// against the *resolved destination IP* — we resolve locally
 	// before handing the (resolved) hostport to the proxy, so a
 	// compromised client cannot use the proxy to bypass our SSRF
-	// gate. Trade-off: DNS-via-proxy (Goose's "target sites see
-	// Cloudflare IP for DNS too") is sacrificed; only the dial
-	// itself goes through the proxy. The user-visible Cloudflare-
-	// egress-IP property is preserved (target servers see the
-	// proxy's egress IP for the TCP connection).
+	// gate. Trade-off: DNS-via-proxy (target sites see only the
+	// proxy IP, never the VPS resolver) is sacrificed; only the
+	// dial itself goes through the proxy. The user-visible
+	// Cloudflare-egress-IP property is preserved (target servers
+	// see the proxy's egress IP for the TCP connection).
 	ProxyDialer proxy.Dialer
 }
 
