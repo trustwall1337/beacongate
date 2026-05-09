@@ -435,8 +435,17 @@ func (p *Pump) tick() error {
 
 	resp, err := p.rt.Exchange(ctx, batch)
 	if err != nil {
-		// A long-poll cancelled by signalFlush is expected, not a fault.
-		if longPoll && errors.Is(err, context.Canceled) {
+		// Both endings are expected for long-polls and should not be
+		// classified as failures by recordErr (whose 3-strike counter
+		// trips state→degraded and starves the data path):
+		//   - context.Canceled:        signalFlush cancelled us so the
+		//                              pump can send freshly-queued
+		//                              outbound work in the next tick.
+		//   - context.DeadlineExceeded: the long-poll's own
+		//                              idleHold+5s deadline fired with
+		//                              no upstream data — normal idle
+		//                              roll-over to the next long-poll.
+		if longPoll && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 			return nil
 		}
 		p.rt.Log().Warn("pump.exchange_failed",

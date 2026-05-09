@@ -1,11 +1,15 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/trustwall1337/beacongate/engine/config"
+	"github.com/trustwall1337/beacongate/engine/crypto"
 	"github.com/trustwall1337/beacongate/engine/protocol"
+	"github.com/trustwall1337/beacongate/engine/transport/transporttest"
 )
 
 // TestReconnectBackoffBeforeThreshold confirms we use the fast 200ms
@@ -42,6 +46,77 @@ func TestReconnectBackoffExponential(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("fails=%d: backoff=%v, want %v", tc.fails, got, tc.want)
 		}
+	}
+}
+
+// TestPumpLongPollDeadlineNotCountedAsFailure: when the long-poll's
+// own idleHold+5s deadline expires (no upstream data arrived), tick()
+// MUST return nil so loop() calls recordSuccess instead of recordErr.
+//
+// Regression guard for the bug discovered in production where every
+// idle long-poll counted as a failure: 3 idle ticks tripped state to
+// "degraded", 5 tripped "reconnecting" exponential backoff, and the
+// data path stalled even though the transport was healthy.
+//
+// Symptom in the field was: client status reported state=degraded with
+// last_error="...context deadline exceeded" while server logs showed
+// session.open / upstream_eof landing cleanly — server-side fine,
+// client-side state machine over-reactive to natural long-poll timeouts.
+func TestPumpLongPollDeadlineNotCountedAsFailure(t *testing.T) {
+	// Transport handler returns context.DeadlineExceeded immediately —
+	// functionally identical to the real production scenario (the
+	// pump's long-poll context fires its idleHold+5s deadline) but
+	// without waiting 5s per tick. errors.Is(err, context.DeadlineExceeded)
+	// holds either way; that's the assertion the pump's discriminator
+	// makes at sessions.go:439.
+	ft := &transporttest.Fake{
+		Handler: func(_ context.Context, _ []byte) ([]byte, error) {
+			return nil, context.DeadlineExceeded
+		},
+	}
+
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.ClientConfig{
+		ClientID:   "client-deadline-test",
+		ListenAddr: "127.0.0.1:0",
+		Server:     config.ClientServerConfig{URL: "http://example", Key: config.EncodeKey(key)},
+		Transport:  config.ClientTransportConfig{Type: "fake"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := New(cfg, ft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	p := NewPump(rt)
+	// Tight idleHold so the long-poll deadline fires fast in tests.
+	// Real production value is much larger.
+	p.SetIdleHold(20 * time.Millisecond)
+	// Inject a placeholder session so tick() takes the longPoll path
+	// (instead of parking on the empty-sessions branch).
+	p.mu.Lock()
+	p.sessions["test-session"] = &ClientSession{}
+	p.mu.Unlock()
+
+	// Drive enough ticks to exceed BOTH the degraded threshold (3) and
+	// the reconnecting threshold (5). All should be silent no-ops.
+	for i := 0; i < reconnectingAfterFails+2; i++ {
+		if err := p.tick(); err != nil {
+			t.Fatalf("tick #%d: returned %v; long-poll deadline should be a non-error completion", i+1, err)
+		}
+	}
+
+	if got := p.consecutiveFails; got != 0 {
+		t.Errorf("consecutiveFails=%d after %d long-poll deadlines; want 0", got, reconnectingAfterFails+2)
+	}
+	if got := rt.State(); got == StateDegraded || got == StateError {
+		t.Errorf("state=%v after long-poll deadlines; want healthy state (Connected/Starting), not degraded/error", got)
 	}
 }
 
