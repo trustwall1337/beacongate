@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"log/slog"
@@ -138,7 +139,7 @@ func main() {
 	go func() {
 		serverLog.Info("startup.listening",
 			"addr", cfg.ListenAddr, "tunnel_path", tunnelPath, "health_path", healthPath)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverLog.Error("http.serve_failed", "error", err.Error())
 		}
 	}()
@@ -162,7 +163,7 @@ func main() {
 		go func() {
 			serverLog.Info("admin_api.listening",
 				"addr", cfg.Admin.ListenAddr, "mode", mode)
-			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				serverLog.Error("admin_api.failed", "error", err.Error())
 			}
 		}()
@@ -180,5 +181,3 @@ func main() {
 	}
 	srv.Close()
 }
-
-var _ = os.Args

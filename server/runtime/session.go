@@ -19,8 +19,9 @@ type serverSession struct {
 	mu sync.Mutex
 
 	// nextRecvSeq is the seq value expected on the next inbound DATA from
-	// the client. It mirrors the engine/session state machine but specific
-	// to a server-side connection.
+	// the client. The session lifecycle is documented in
+	// docs/protocol.md §"Session Lifecycle"; this struct is the
+	// server-side implementation.
 	nextRecvSeq uint64
 	// nextSendSeq is the seq value to assign to the next outbound DATA we
 	// send back to the client.

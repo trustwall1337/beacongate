@@ -1,6 +1,6 @@
 .PHONY: all ci clean help \
-        go-build go-test go-race go-vet go-fmt go-fmt-check go-lint go-tidy \
-        build test race vet fmt fmt-check lint tidy \
+        go-build go-test go-race go-vet go-fmt go-fmt-check go-lint go-tidy go-bench go-fuzz \
+        build test race vet fmt fmt-check lint tidy bench fuzz \
         desktop-build desktop-test mobile-build mobile-test \
         docker-build docker-init docker-up docker-down docker-logs docker-status docker-clean
 
@@ -75,6 +75,19 @@ go-lint:
 go-tidy:
 	$(GO) mod tidy
 
+# go-bench runs the in-process performance benchmarks. Plan A7 #8–13:
+# numbers are an internal floor only; real Apps Script p50/p95
+# measurements need a deployment with a real network leg (see
+# apps_script/README.md and docs/deployment.md "B7. Verify").
+go-bench:
+	$(GO) test -bench=. -benchmem -benchtime=1s -timeout 120s -run='^$$' ./engine/transport/appsscript/...
+
+# go-fuzz runs both fuzz targets for 30s each. Use longer fuzztime
+# in CI when the budget allows.
+go-fuzz:
+	$(GO) test -fuzz=FuzzOpen -fuzztime=30s ./engine/crypto/
+	$(GO) test -fuzz=FuzzDecodeEnvelope -fuzztime=30s ./engine/protocol/
+
 # --- Desktop subtree (placeholder) -------------------------------------
 
 desktop-build:
@@ -109,6 +122,8 @@ fmt: go-fmt
 fmt-check: go-fmt-check
 lint: go-lint
 tidy: go-tidy
+bench: go-bench
+fuzz: go-fuzz
 
 clean:
 	rm -rf $(BIN) dist coverage.out

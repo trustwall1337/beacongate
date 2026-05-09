@@ -1,13 +1,29 @@
 # BeaconGate
 
 BeaconGate is a clean-room relay platform built around a transport-agnostic
-core engine and a Google-facing first transport. Encrypted batches travel
-between a local SOCKS5 client and a remote exit server; the exit server
-enforces server-side outbound policy before dialing.
+core engine. Encrypted batches travel between a local SOCKS5 client and a
+remote exit server; the exit server enforces server-side outbound policy
+before dialing.
 
 It is a **multi-language monorepo**. The current Go implementation covers
 phases 1 and 2 (engine + control API). Desktop and mobile workstreams are
 reserved as sibling subtrees and will be added in their own languages.
+
+## Transport modes
+
+| Mode | Status | What it does | Use it when |
+| --- | --- | --- | --- |
+| `https` (currently named `google` in source — being renamed in v1.1) | **Ships today** | Direct HTTPS POST to an operator-configured URL. Generic HTTPS, **NOT a censorship-evasion path**. A network observer sees TLS to your relay's hostname. | You operate your own relay behind a CDN / your own domain fronting, or you don't need on-path-censor evasion. |
+| `appsscript` | **Lands in v1.1** | Tunnels every batch through a user-deployed Google Apps Script web app. Wire path terminates at a real Google IP with `SNI=www.google.com` and HTTP `Host: script.google.com`. | You need network traffic that looks like ordinary Google/Apps Script traffic to a network observer. |
+
+> **Note on the historical naming:** the current `engine/transport/google`
+> package was named for the *intended* Google-facing role, but in `master`
+> it is just a generic HTTPS transport. The v1.1 release renames the
+> package to `https` and adds a new `engine/transport/appsscript` package
+> that delivers the actual censorship-evasion property. See
+> [docs/architecture.md](docs/architecture.md) §1 for the full story and
+> [docs/planning/STEP-1-core-engine.md](docs/planning/STEP-1-core-engine.md)
+> §"Retrospective" for why this gap exists.
 
 ## Repository layout
 
@@ -20,7 +36,10 @@ beacongate/
     session/                   session state machine
     config/                    JSON config loader
     transport/                 transport abstraction
-      google/                    Google-fronted HTTPS transport (TLS 1.3)
+      google/                    Direct HTTPS POST transport (renamed `https` in v1.1).
+                                   NOT a Google-disguised path despite the package name.
+      appsscript/                (v1.1) Apps-Script-tunneled transport (the actual
+                                   censorship-evasion path)
       transporttest/             httptest-style fakes
   client/                    Go: client side of the relay
     runtime/                   protocol roundtrip, long-poll pump

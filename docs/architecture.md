@@ -11,11 +11,23 @@ specific subsystems.
 The user's machine cannot (or chooses not to) reach a destination on the
 public internet directly. BeaconGate places **two processes** in the
 path: one on the user's machine, one on a remote server the user
-operates. They speak a small encrypted protocol over an "allowed"
-transport (HTTPS to a Google-fronted endpoint in v1). Local apps point
-their proxy setting at the local BeaconGate process; their traffic
-travels encrypted to the remote BeaconGate process, which makes the
-real outbound TCP connection on their behalf.
+operates. They speak a small encrypted protocol over a transport. Local
+apps point their proxy setting at the local BeaconGate process; their
+traffic travels encrypted to the remote BeaconGate process, which makes
+the real outbound TCP connection on their behalf.
+
+> **Transport status (as of pre-v1.1):** the only transport that ships
+> today is a **direct HTTPS POST** to an operator-configured URL
+> (package `engine/transport/google`, named for historical reasons —
+> being renamed to `https` in v1.1). It does NOT disguise the traffic
+> as Google traffic; a network observer sees TLS to your operator's
+> relay hostname.
+>
+> The **`appsscript` transport — the actual censorship-evasion path
+> that tunnels through Google Apps Script so the wire looks like
+> ordinary HTTPS to `script.google.com` — lands in v1.1**. Until then,
+> use the `https` transport behind your own CDN / domain-fronting setup
+> if you need on-path-censor evasion.
 
 ---
 
@@ -233,7 +245,10 @@ engine/                 Shared Go code used by BOTH client and server
   session/                Session state machine
   config/                 JSON config loader
   transport/              Abstraction for "how do encrypted batches travel?"
-    google/                 Google-fronted HTTPS implementation
+    google/                 Direct HTTPS POST transport (renamed to `https` in v1.1).
+                              NOT a Google-disguised path despite the name.
+    appsscript/             (v1.1) Apps-Script-tunneled transport — the
+                              actual censorship-evasion path
     transporttest/          httptest-style fakes for tests
 
 client/                 BeaconGate client-only code
@@ -288,7 +303,7 @@ A package's location tells you who can use it:
 
 | Term | Definition |
 | --- | --- |
-| **Transport** | The abstraction for *how* encrypted batches get from client to server. v1 is HTTPS via a Google-fronted endpoint (the `engine/transport/google` package). The protocol is transport-agnostic — adding QUIC or WebSocket means a new package, not a rewrite. |
+| **Transport** | The abstraction for *how* encrypted batches get from client to server. The shipping transport pre-v1.1 is **direct HTTPS POST** (the `engine/transport/google` package, renamed to `https` in v1.1) — it connects directly to the operator's relay URL and does NOT disguise the traffic as Google. The actual Google-tunneled censorship-evasion transport (`engine/transport/appsscript`) lands in v1.1. The protocol is transport-agnostic — adding QUIC, WebSocket, or another fronting path means a new package, not a rewrite. |
 | **Pump** | The client's per-process request scheduler ([client/runtime/sessions.go](../client/runtime/sessions.go)). Maintains one in-flight HTTP request at a time; carries outbound traffic when there is any, otherwise sends a PROBE that the server holds open ("long-poll") so server-originated bytes can flow back. |
 | **Long-poll** | Server-side technique to deliver data over a request/response transport. When the server has nothing to send, it holds the client's request open up to ~25 seconds, returning early as soon as upstream bytes arrive. Reduces idle bandwidth from ~13 req/s to ~1 req per 25s. |
 | **Tunnel handler** | The server's HTTP handler at `/tunnel`. Decrypts, dispatches messages to sessions, drains pending upstream bytes, encrypts the response. |
@@ -436,9 +451,18 @@ In this order:
   Electron, or native).
 - **Mobile** ([../mobile/README.md](../mobile/README.md)) — strategy
   step before any code. iOS / Android subtrees reserved.
-- **Additional transports** — anything that can carry opaque encrypted
-  batches: a different fronting host, WebSocket, QUIC, etc. Each is a
-  new package under `engine/transport/`.
-- **Per-client AEAD keys** — derived from a master via HKDF, with
-  `client_id` in a small cleartext header so the server picks the
-  right key before AEAD-opening. Requires a v1.1 protocol bump.
+- **`appsscript` transport (v1.1)** — the censorship-evasion path that
+  tunnels every batch through a user-deployed Google Apps Script web
+  app, so the network path terminates at a real Google IP with
+  `SNI=www.google.com` and HTTP `Host: script.google.com`. This is the
+  property the project is named for; it is not yet implemented in
+  `master`.
+- **Per-client AEAD keys (v1.1)** — derived from a master via HKDF,
+  with `client_id` in a small cleartext header so the server picks
+  the right key before AEAD-opening. Lands together with the
+  `appsscript` transport in the v1.1 protocol bump.
+- **Replay protection (v1.1)** — timestamp + replay-id inside the
+  AEAD, sliding-window dedup cache server-side. Lands with v1.1.
+- **Additional transports beyond v1.1** — anything that can carry
+  opaque encrypted batches: WebSocket, QUIC, Cloudflare Worker, etc.
+  Each is a new package under `engine/transport/`.

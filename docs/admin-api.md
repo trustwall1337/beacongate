@@ -89,3 +89,21 @@ Delete a rule. Returns 204 on success, 404 if missing.
 Every successful POST/PUT/DELETE refreshes the in-memory policy engine
 from the store, so rule changes take effect on the next session OPEN
 without restarting the server.
+
+## Rate limits (v1.1)
+
+The server enforces two rate limits, both internal to the runtime
+(neither is configurable through the admin API today; both have
+hard-coded defaults):
+
+| Limit | Default | Returns |
+| --- | --- | --- |
+| Admin auth failures per IP | 8 / 5 min | HTTP 429 with `Retry-After` |
+| `/tunnel` requests per IP | 50 req/s, burst 100 | HTTP 429 |
+
+A peer that bursts past the `/tunnel` cap is throttled per source IP;
+sustained overage indicates either a misbehaving client or a flood
+from someone holding the AEAD key. Pair with the per-client session
+cap (default 100, configurable in `server_config.json` under
+`limits.max_sessions_per_client`) and the v1.1 replay store's
+RATE_PRESSURE rejection for defense in depth.

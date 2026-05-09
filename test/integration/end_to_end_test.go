@@ -20,7 +20,7 @@ import (
 	"github.com/trustwall1337/beacongate/engine/config"
 	"github.com/trustwall1337/beacongate/engine/crypto"
 	"github.com/trustwall1337/beacongate/engine/protocol"
-	"github.com/trustwall1337/beacongate/engine/transport/google"
+	httpstransport "github.com/trustwall1337/beacongate/engine/transport/https"
 	"github.com/trustwall1337/beacongate/server/policy"
 	serverruntime "github.com/trustwall1337/beacongate/server/runtime"
 	"github.com/trustwall1337/beacongate/server/upstream"
@@ -121,12 +121,12 @@ func setup(t *testing.T) *harness {
 		ClientID:   "client-it",
 		ListenAddr: "127.0.0.1:0",
 		Server:     config.ClientServerConfig{URL: ts.URL + "/tunnel", Key: config.EncodeKey(key)},
-		Transport:  config.ClientTransportConfig{Type: "google"},
+		Transport:  config.ClientTransportConfig{Type: "https"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	tr, err := google.New(google.Config{URL: cfg.Server.URL, HealthURL: ts.URL + "/healthz"})
+	tr, err := httpstransport.New(httpstransport.Config{URL: cfg.Server.URL, HealthURL: ts.URL + "/healthz"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,6 +271,128 @@ func TestEndToEndProbe(t *testing.T) {
 	}
 	if resp.Status != "ok" {
 		t.Fatalf("status %q", resp.Status)
+	}
+}
+
+// TestEndToEndIdempotentRetryThroughFullPipeline exercises plan B4's
+// idempotency guarantee end-to-end. Capture a sealed wire packet
+// produced by the real client→server pipe, then re-POST it directly.
+// The server's replay store must return the cached response bytes
+// verbatim instead of rejecting or re-processing.
+func TestEndToEndIdempotentRetryThroughFullPipeline(t *testing.T) {
+	h := setup(t)
+	defer h.cleanup()
+
+	// Build a signed wire packet by going through the client runtime's
+	// Exchange path with a controlled in-memory transport. The transport
+	// captures both the wire bytes sent and the response bytes received,
+	// then forwards through to the real server.
+	type captured struct {
+		wireOut, wireIn []byte
+	}
+	cap := &captured{}
+
+	// We can't easily intercept inside h.clientRT, so build the wire
+	// bytes ourselves using the real sealer (matches h.serverObj's key).
+	keyBytes, err := h.clientCfg.ServerKeyBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := crypto.NewSealer(keyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := protocol.Envelope{
+		Version:     protocol.Version{Major: 1, Minor: 1},
+		ClientID:    h.clientCfg.ClientID,
+		Compression: protocol.CompressionNone,
+		Messages:    []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: "idempo"}},
+	}
+	plain, _ := protocol.EncodeEnvelope(env)
+	cap.wireOut, err = sealer.Seal(env.ClientID, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First POST: server processes, caches the response.
+	resp1, err := http.Post(h.tunnelURL, "application/octet-stream", bytes.NewReader(cap.wireOut))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first POST status %d", resp1.StatusCode)
+	}
+
+	// Idempotent retry: same wire bytes within the response-cache TTL
+	// → cached response, byte-identical.
+	resp2, err := http.Post(h.tunnelURL, "application/octet-stream", bytes.NewReader(cap.wireOut))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("retry POST status %d body=%s", resp2.StatusCode, body2)
+	}
+	if !bytes.Equal(body1, body2) {
+		t.Fatalf("idempotent retry: response body changed (re-processed instead of cached)")
+	}
+}
+
+// TestEndToEndAADBindingRejectsCrossClientReplay proves plan B1's AAD
+// binding through the full pipe: a captured wire packet whose
+// cleartext client_id is swapped at the same length fails at the
+// server's AEAD check, returning HTTP 401 with no body detail (no
+// fingerprinting via status code).
+func TestEndToEndAADBindingRejectsCrossClientReplay(t *testing.T) {
+	h := setup(t)
+	defer h.cleanup()
+
+	keyBytes, _ := h.clientCfg.ServerKeyBytes()
+	sealer, err := crypto.NewSealer(keyBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "client-it" is the integration test's client_id (12 bytes); pick a
+	// same-length swap so the wire layout's length field stays valid.
+	const sameLength = "client-xy"
+	if len(h.clientCfg.ClientID) != len(sameLength)+3 {
+		// "client-it" is 9 bytes, sameLength="client-xy" is also 9.
+		// The check above is just defensive; if either renames, the
+		// test maintainer needs to pick a same-length swap.
+	}
+	swap := "client-yz" // 9 bytes, matches "client-it" exactly
+	if len(swap) != len(h.clientCfg.ClientID) {
+		t.Fatalf("test setup: swap target %q must be same length as %q", swap, h.clientCfg.ClientID)
+	}
+
+	env := protocol.Envelope{
+		Version:     protocol.Version{Major: 1, Minor: 1},
+		ClientID:    h.clientCfg.ClientID,
+		Compression: protocol.CompressionNone,
+		Messages:    []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: "aad"}},
+	}
+	plain, _ := protocol.EncodeEnvelope(env)
+	wire, err := sealer.Seal(env.ClientID, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Splice in the swap at the cleartext-id offset.
+	off := 1 + 2
+	for i := range swap {
+		wire[off+i] = swap[i]
+	}
+
+	resp, err := http.Post(h.tunnelURL, "application/octet-stream", bytes.NewReader(wire))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on AAD-tampered client_id, got %d", resp.StatusCode)
 	}
 }
 

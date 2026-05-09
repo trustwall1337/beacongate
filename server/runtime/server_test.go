@@ -70,11 +70,11 @@ func roundtrip(t *testing.T, ts *httptest.Server, sealer *crypto.Sealer, env pro
 	if err != nil {
 		t.Fatal(err)
 	}
-	cipher, err := sealer.Seal(plain)
+	wire, err := sealer.Seal(env.ClientID, plain)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.Post(ts.URL+"/tunnel", "application/octet-stream", bytes.NewReader(cipher))
+	resp, err := http.Post(ts.URL+"/tunnel", "application/octet-stream", bytes.NewReader(wire))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,11 +84,11 @@ func roundtrip(t *testing.T, ts *httptest.Server, sealer *crypto.Sealer, env pro
 		t.Fatalf("status %d body=%s", resp.StatusCode, body)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	rp, err := sealer.Open(body)
+	batch, err := sealer.Open(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := protocol.DecodeEnvelope(rp)
+	out, err := protocol.DecodeEnvelope(batch.Plaintext)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestTunnelOpenAndEcho(t *testing.T) {
 	defer srv.Close()
 
 	envOpen := protocol.Envelope{
-		Version:     protocol.Version{Major: 1, Minor: 0},
+		Version:     protocol.Version{Major: 1, Minor: 1},
 		ClientID:    "client-x",
 		Compression: protocol.CompressionNone,
 		Messages: []protocol.Message{
@@ -122,7 +122,7 @@ func TestTunnelOpenAndEcho(t *testing.T) {
 	if !gotEcho {
 		// poll once more
 		envPoll := protocol.Envelope{
-			Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "client-x",
+			Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "client-x",
 			Compression: protocol.CompressionNone,
 			Messages:    []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: "p"}},
 		}
@@ -161,12 +161,12 @@ func TestTunnelBadKey(t *testing.T) {
 	defer srv.Close()
 
 	env := protocol.Envelope{
-		Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "x",
+		Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "x",
 		Compression: protocol.CompressionNone,
 		Messages:    []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: "p"}},
 	}
 	plain, _ := protocol.EncodeEnvelope(env)
-	cipher, _ := clientSealer.Seal(plain)
+	cipher, _ := clientSealer.Seal(env.ClientID, plain)
 	resp, err := http.Post(ts.URL+"/tunnel", "application/octet-stream", bytes.NewReader(cipher))
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +193,7 @@ func TestTunnelPolicyDenyOnOpen(t *testing.T) {
 	defer srv.Close()
 
 	env := protocol.Envelope{
-		Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "client-y",
+		Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "client-y",
 		Compression: protocol.CompressionNone,
 		Messages: []protocol.Message{
 			{Type: protocol.MessageTypeOpen, SessionID: "s1", Target: &protocol.Target{Network: "tcp", Host: "blocked.example", Port: 80}},
@@ -222,7 +222,7 @@ func TestServerCloseTerminatesSessions(t *testing.T) {
 	defer ts.Close()
 
 	env := protocol.Envelope{
-		Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "c",
+		Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "c",
 		Compression: protocol.CompressionNone,
 		Messages: []protocol.Message{
 			{Type: protocol.MessageTypeOpen, SessionID: "s", Target: &protocol.Target{Network: "tcp", Host: host, Port: port}},
@@ -268,7 +268,7 @@ func TestLongPollWakesOnData(t *testing.T) {
 
 	// Open a session first.
 	roundtrip(t, ts, sealer, protocol.Envelope{
-		Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "lp",
+		Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "lp",
 		Compression: protocol.CompressionNone,
 		Messages: []protocol.Message{
 			{Type: protocol.MessageTypeOpen, SessionID: "s1", Target: &protocol.Target{Network: "tcp", Host: host, Port: port}},
@@ -285,7 +285,7 @@ func TestLongPollWakesOnData(t *testing.T) {
 	go func() {
 		start := time.Now()
 		out := roundtrip(t, ts, sealer, protocol.Envelope{
-			Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "lp",
+			Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "lp",
 			Compression: protocol.CompressionNone,
 			Messages:    []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: "lp1"}},
 		})
@@ -297,7 +297,7 @@ func TestLongPollWakesOnData(t *testing.T) {
 
 	// Push DATA on a separate request; server echoes upstream immediately.
 	roundtrip(t, ts, sealer, protocol.Envelope{
-		Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "lp",
+		Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "lp",
 		Compression: protocol.CompressionNone,
 		Messages: []protocol.Message{
 			{Type: protocol.MessageTypeData, SessionID: "s1", Seq: u64(0), Data: []byte("ping")},
@@ -334,7 +334,7 @@ func TestLongPollCancelDoesNotDrain(t *testing.T) {
 
 	// Open the session.
 	roundtrip(t, ts, sealer, protocol.Envelope{
-		Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "lp2",
+		Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "lp2",
 		Compression: protocol.CompressionNone,
 		Messages: []protocol.Message{
 			{Type: protocol.MessageTypeOpen, SessionID: "s2", Target: &protocol.Target{Network: "tcp", Host: host, Port: port}},
@@ -343,7 +343,7 @@ func TestLongPollCancelDoesNotDrain(t *testing.T) {
 
 	// Issue a long-poll request and cancel it almost immediately.
 	cipher := mustSeal(t, sealer, protocol.Envelope{
-		Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "lp2",
+		Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "lp2",
 		Compression: protocol.CompressionNone,
 		Messages:    []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: "x"}},
 	})
@@ -362,7 +362,7 @@ func TestLongPollCancelDoesNotDrain(t *testing.T) {
 	// If cancellation drained, the seq counter would have advanced and the
 	// next response's seq would not start at 0.
 	out := roundtrip(t, ts, sealer, protocol.Envelope{
-		Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "lp2",
+		Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "lp2",
 		Compression: protocol.CompressionNone,
 		Messages: []protocol.Message{
 			{Type: protocol.MessageTypeData, SessionID: "s2", Seq: u64(0), Data: []byte("hi")},
@@ -380,7 +380,7 @@ func TestLongPollCancelDoesNotDrain(t *testing.T) {
 			}
 		}
 		out = roundtrip(t, ts, sealer, protocol.Envelope{
-			Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "lp2",
+			Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "lp2",
 			Compression: protocol.CompressionNone,
 			Messages:    []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: "p"}},
 		})
@@ -394,11 +394,11 @@ func mustSeal(t *testing.T, s *crypto.Sealer, env protocol.Envelope) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cipher, err := s.Seal(plain)
+	wire, err := s.Seal(env.ClientID, plain)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return cipher
+	return wire
 }
 
 func TestServerContextCancelOnDial(t *testing.T) {
@@ -412,7 +412,7 @@ func TestServerContextCancelOnDial(t *testing.T) {
 	defer srv.Close()
 
 	env := protocol.Envelope{
-		Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "c",
+		Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "c",
 		Compression: protocol.CompressionNone,
 		Messages: []protocol.Message{
 			{Type: protocol.MessageTypeOpen, SessionID: "s", Target: &protocol.Target{Network: "tcp", Host: "192.0.2.1", Port: 1}},

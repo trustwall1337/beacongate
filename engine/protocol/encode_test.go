@@ -63,7 +63,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 
 func TestEncodeDecodeReset(t *testing.T) {
 	env := Envelope{
-		Version:     Version{Major: 1, Minor: 0},
+		Version:     Version{Major: 1, Minor: 1},
 		ClientID:    "server-west-1",
 		Compression: CompressionNone,
 		Messages: []Message{
@@ -85,7 +85,7 @@ func TestEncodeDecodeReset(t *testing.T) {
 
 func TestEncodeDecodeProbe(t *testing.T) {
 	env := Envelope{
-		Version:     Version{Major: 1, Minor: 0},
+		Version:     Version{Major: 1, Minor: 1},
 		ClientID:    "server-west-1",
 		Compression: CompressionNone,
 		Messages: []Message{
@@ -93,8 +93,8 @@ func TestEncodeDecodeProbe(t *testing.T) {
 				Type:              MessageTypeProbe,
 				ProbeID:           "probe-42",
 				Status:            "ok",
-				SupportedVersions: []Version{{Major: 1, Minor: 0}},
-				SelectedVersion:   &Version{Major: 1, Minor: 0},
+				SupportedVersions: []Version{{Major: 1, Minor: 1}},
+				SelectedVersion:   &Version{Major: 1, Minor: 1},
 			},
 		},
 	}
@@ -128,7 +128,9 @@ func TestDecodeRejectsTruncated(t *testing.T) {
 
 func TestDecodeRejectsUnsupportedVersion(t *testing.T) {
 	env := validOpenEnvelope()
-	env.Version.Minor = 1
+	// v1.1 is the supported version post-cut. Pick a future unsupported
+	// minor to test the rejection path.
+	env.Version.Minor = 2
 	raw, err := json.Marshal(env)
 	if err != nil {
 		t.Fatal(err)
@@ -164,7 +166,7 @@ func TestDecodeRejectsMissingClientID(t *testing.T) {
 
 func TestDecodeRejectsEmptyMessages(t *testing.T) {
 	env := Envelope{
-		Version:     Version{Major: 1, Minor: 0},
+		Version:     Version{Major: 1, Minor: 1},
 		ClientID:    "c",
 		Compression: CompressionNone,
 		Messages:    []Message{},
@@ -179,21 +181,21 @@ func TestDecodeRejectsEmptyMessages(t *testing.T) {
 }
 
 func TestDecodeRejectsUnknownMessageType(t *testing.T) {
-	raw := []byte(`{"version":{"major":1,"minor":0},"client_id":"c","compression":"none","messages":[{"type":"WAT","session_id":"s"}]}`)
+	raw := []byte(`{"version":{"major":1,"minor":1},"client_id":"c","compression":"none","messages":[{"type":"WAT","session_id":"s"}]}`)
 	if _, err := DecodeEnvelope(raw); !errors.Is(err, ErrMalformedEnvelope) {
 		t.Fatalf("expected malformed, got %v", err)
 	}
 }
 
 func TestDecodeRejectsUnknownTopLevelField(t *testing.T) {
-	raw := []byte(`{"version":{"major":1,"minor":0},"client_id":"c","compression":"none","messages":[{"type":"PING","session_id":"s"}],"extra":"x"}`)
+	raw := []byte(`{"version":{"major":1,"minor":1},"client_id":"c","compression":"none","messages":[{"type":"PING","session_id":"s"}],"extra":"x"}`)
 	if _, err := DecodeEnvelope(raw); !errors.Is(err, ErrMalformedEnvelope) {
 		t.Fatalf("expected malformed for unknown field, got %v", err)
 	}
 }
 
 func TestDecodeRejectsUnknownMessageField(t *testing.T) {
-	raw := []byte(`{"version":{"major":1,"minor":0},"client_id":"c","compression":"none","messages":[{"type":"PING","session_id":"s","wat":1}]}`)
+	raw := []byte(`{"version":{"major":1,"minor":1},"client_id":"c","compression":"none","messages":[{"type":"PING","session_id":"s","wat":1}]}`)
 	if _, err := DecodeEnvelope(raw); !errors.Is(err, ErrMalformedEnvelope) {
 		t.Fatalf("expected malformed for unknown message field, got %v", err)
 	}
@@ -201,7 +203,7 @@ func TestDecodeRejectsUnknownMessageField(t *testing.T) {
 
 func TestDecodeRejectsOpenWithoutTarget(t *testing.T) {
 	env := Envelope{
-		Version:     Version{Major: 1, Minor: 0},
+		Version:     Version{Major: 1, Minor: 1},
 		ClientID:    "c",
 		Compression: CompressionNone,
 		Messages: []Message{
@@ -218,7 +220,7 @@ func TestDecodeRejectsOpenWithoutTarget(t *testing.T) {
 }
 
 func TestDecodeRejectsDataWithoutSeq(t *testing.T) {
-	raw := []byte(`{"version":{"major":1,"minor":0},"client_id":"c","compression":"none","messages":[{"type":"DATA","session_id":"s"}]}`)
+	raw := []byte(`{"version":{"major":1,"minor":1},"client_id":"c","compression":"none","messages":[{"type":"DATA","session_id":"s"}]}`)
 	if _, err := DecodeEnvelope(raw); !errors.Is(err, ErrInvalidMessage) {
 		t.Fatalf("expected invalid message, got %v", err)
 	}
@@ -226,7 +228,7 @@ func TestDecodeRejectsDataWithoutSeq(t *testing.T) {
 
 func TestEncodeRejectsInvalidType(t *testing.T) {
 	env := Envelope{
-		Version:     Version{Major: 1, Minor: 0},
+		Version:     Version{Major: 1, Minor: 1},
 		ClientID:    "c",
 		Compression: CompressionNone,
 		Messages:    []Message{{Type: MessageType(99), SessionID: "s"}},

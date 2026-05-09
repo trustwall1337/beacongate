@@ -89,19 +89,25 @@ func (r *Runtime) Exchange(ctx context.Context, msgs []protocol.Message) ([]prot
 	if err != nil {
 		return nil, fmt.Errorf("client runtime: encode envelope: %w", err)
 	}
-	ciphertext, err := r.sealer.Seal(plaintext)
+	wire, err := r.sealer.Seal(r.cfg.ClientID, plaintext)
 	if err != nil {
 		return nil, fmt.Errorf("client runtime: seal: %w", err)
 	}
-	respCipher, err := r.transport.Roundtrip(ctx, ciphertext)
+	respWire, err := r.transport.Roundtrip(ctx, wire)
 	if err != nil {
 		return nil, err
 	}
-	respPlain, err := r.sealer.Open(respCipher)
+	// Open returns a SealedBatch with the server's client_id (typically
+	// server_id) plus the inner timestamp/replay-id. The client doesn't
+	// need to dedup server-originated batches today (the Pump
+	// serializes one in-flight request at a time), so we ignore those
+	// fields here. If a future change adds server-side replay defense
+	// for the response leg, this is the spot to wire it.
+	batch, err := r.sealer.Open(respWire)
 	if err != nil {
 		return nil, fmt.Errorf("client runtime: open response: %w", err)
 	}
-	respEnv, err := protocol.DecodeEnvelope(respPlain)
+	respEnv, err := protocol.DecodeEnvelope(batch.Plaintext)
 	if err != nil {
 		return nil, fmt.Errorf("client runtime: decode response: %w", err)
 	}

@@ -12,13 +12,32 @@ import (
 	"time"
 
 	"github.com/trustwall1337/beacongate/engine/protocol"
+	"github.com/trustwall1337/beacongate/engine/replay"
 )
 
-const tunnelMaxBody = 4 * 1024 * 1024
+const (
+	tunnelMaxBody = 4 * 1024 * 1024
+
+	// timestampSkewMax is the absolute clock-skew tolerance for the
+	// inner AEAD-bound timestamp (plan B1). Envelopes outside this
+	// window are rejected as stale (likely replays past the dedup
+	// cap, or a misconfigured client clock). 5 minutes matches the
+	// plan; loosen only if the deployment's NTP discipline is
+	// known-bad.
+	timestampSkewMax = 5 * time.Minute
+)
 
 func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Plan D1: per-IP rate cap. Lifted before any per-request work
+	// so a flood doesn't load the server beyond reading the IP.
+	ip := remoteIP(r.RemoteAddr)
+	if !s.tunnelLimiter.Allow(ip, time.Now()) {
+		s.log().Warn("tunnel.rate_limited", "remote_ip", ip)
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, tunnelMaxBody))
@@ -26,7 +45,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	plaintext, err := s.sealer.Open(body)
+	batch, err := s.sealer.Open(body)
 	if err != nil {
 		// C4: never echo crypto error detail to the wire — it leaks state
 		// useful for fingerprinting (was the body too short? wrong tag?).
@@ -37,11 +56,67 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	env, err := protocol.DecodeEnvelope(plaintext)
+	// Plan B4: consult the replay store. The store handles the
+	// timestamp-window check, dedup cache, and idempotent retry
+	// (cached response replay) in one call.
+	now := time.Now()
+	decision, cachedResponse := s.replayStore.Check(batch.ClientID, batch.ReplayID, batch.Timestamp, now)
+	switch decision {
+	case replay.Accept:
+		// New batch — process below. The handler will call
+		// RecordResponse after building the response.
+	case replay.DuplicateProcessed:
+		// Idempotent retry. Return the cached response verbatim.
+		// The wire bytes are already encrypted (the cache stores
+		// the post-Seal bytes), so just write them back.
+		s.log().Info("tunnel.replay_idempotent",
+			"client_id", batch.ClientID,
+			"size", len(cachedResponse))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(cachedResponse)
+		return
+	case replay.Replayed:
+		s.log().Warn("tunnel.replay_rejected",
+			"remote_addr", r.RemoteAddr,
+			"client_id", batch.ClientID)
+		http.Error(w, "replayed", http.StatusBadRequest)
+		return
+	case replay.StaleTimestamp:
+		s.log().Warn("tunnel.stale_envelope",
+			"remote_addr", r.RemoteAddr,
+			"client_id", batch.ClientID,
+			"skew", now.Sub(batch.Timestamp).String())
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	case replay.RatePressure:
+		s.log().Warn("tunnel.rate_pressure",
+			"remote_addr", r.RemoteAddr,
+			"client_id", batch.ClientID)
+		http.Error(w, "rate pressure", http.StatusTooManyRequests)
+		return
+	default:
+		s.log().Error("tunnel.unknown_replay_decision",
+			"decision", decision.String())
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	env, err := protocol.DecodeEnvelope(batch.Plaintext)
 	if err != nil {
 		s.log().Warn("tunnel.bad_envelope",
 			"remote_addr", r.RemoteAddr,
 			"error", err.Error())
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// Cleartext header's client_id must match the JSON envelope's
+	// (the AAD already binds the cleartext, but the JSON envelope is
+	// inside the AEAD — assert they match so a future code path can't
+	// quietly read the wrong identity).
+	if env.ClientID != batch.ClientID {
+		s.log().Warn("tunnel.client_id_mismatch",
+			"wire_id", batch.ClientID,
+			"envelope_id", env.ClientID)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -57,12 +132,12 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		window = s.longPollWindow
 		s.mu.Unlock()
 	}
-	respMsgs = append(respMsgs, s.collectUpstreamData(r.Context(), env.ClientID, window, longPoll)...)
+	respMsgs = append(respMsgs, s.collectUpstreamData(r.Context(), env.ClientID, window)...)
 	if len(respMsgs) == 0 {
 		respMsgs = append(respMsgs, protocol.Message{
 			Type: protocol.MessageTypeProbe, ProbeID: "noop",
 			Status:            "ok",
-			SupportedVersions: []protocol.Version{{Major: 1, Minor: 0}},
+			SupportedVersions: []protocol.Version{{Major: 1, Minor: 1}},
 		})
 	}
 
@@ -74,7 +149,7 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := protocol.Envelope{
-		Version:     protocol.Version{Major: 1, Minor: 0},
+		Version:     protocol.Version{Major: 1, Minor: 1},
 		ClientID:    s.serverID,
 		Compression: protocol.CompressionNone,
 		Messages:    respMsgs,
@@ -84,11 +159,20 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "encode response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	cipher, err := s.sealer.Seal(plain)
+	// Seal the response under the server's own client_id. Per-client
+	// key derivation means responses use a *different* AEAD key from
+	// inbound requests (different cleartext id → different HKDF
+	// info), preventing response replay on the request leg.
+	cipher, err := s.sealer.Seal(s.serverID, plain)
 	if err != nil {
 		http.Error(w, "seal", http.StatusInternalServerError)
 		return
 	}
+	// Cache the sealed response bytes so a benign retry of this same
+	// batch (transport-level failover, e.g. appsscript deployment
+	// failover) can return the cached bytes verbatim instead of
+	// reprocessing or being rejected as REPLAYED. See plan B4.
+	s.replayStore.RecordResponse(batch.ClientID, batch.ReplayID, cipher, now)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(cipher)
@@ -116,8 +200,8 @@ func (s *Server) processBatch(ctx context.Context, env protocol.Envelope) []prot
 				Type:              protocol.MessageTypeProbe,
 				ProbeID:           m.ProbeID,
 				Status:            "ok",
-				SupportedVersions: []protocol.Version{{Major: 1, Minor: 0}},
-				SelectedVersion:   &protocol.Version{Major: 1, Minor: 0},
+				SupportedVersions: []protocol.Version{{Major: 1, Minor: 1}},
+				SelectedVersion:   &protocol.Version{Major: 1, Minor: 1},
 			})
 		}
 	}
@@ -140,14 +224,14 @@ func (s *Server) handleOpen(ctx context.Context, clientID string, m protocol.Mes
 	// server by opening unlimited sessions; quota error gets a stable code
 	// the client can surface to its own SOCKS reply.
 	s.mu.Lock()
-	cap := s.maxSessionsPerClient
+	limit := s.maxSessionsPerClient
 	live := len(s.byClient[clientID])
 	s.mu.Unlock()
-	if cap > 0 && live >= cap {
+	if limit > 0 && live >= limit {
 		s.log().Warn("session.quota_exceeded",
 			"client_id", clientID,
 			"session_id", m.SessionID,
-			"live", live, "cap", cap)
+			"live", live, "limit", limit)
 		return []protocol.Message{{
 			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
 			Code:   "POLICY_DENIED",
@@ -203,6 +287,16 @@ func (s *Server) handleOpen(ctx context.Context, clientID string, m protocol.Mes
 		"target", net.JoinHostPort(target.Host, fmt.Sprintf("%d", target.Port)))
 	go s.readUpstream(ss)
 	return nil
+}
+
+// remoteIP extracts the host portion of an http.Request.RemoteAddr.
+// Used as the per-IP key for the tunnel rate limiter.
+func remoteIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
 }
 
 // classifyDialError maps an upstream dial error to a small, stable string
@@ -355,13 +449,14 @@ func isIdleBatch(env protocol.Envelope) bool {
 
 // collectUpstreamData drains pending upstream bytes for the given client
 // into a sequence of DATA messages. It blocks up to window for new data,
-// waking on the per-client signal channel. When longPoll is false the
-// window is short and the function returns whatever is already buffered.
+// waking on the per-client signal channel. The window's caller (the
+// tunnel handler) chooses a short value for active batches and the
+// long-poll value for idle (probe-only) batches.
 //
 // IMPORTANT: drain happens only after the wait phase commits to returning,
 // so a canceled HTTP request leaves bytes in the session's pending buffer
 // for the next request rather than losing them.
-func (s *Server) collectUpstreamData(ctx context.Context, clientID string, window time.Duration, longPoll bool) []protocol.Message {
+func (s *Server) collectUpstreamData(ctx context.Context, clientID string, window time.Duration) []protocol.Message {
 	// Long-poll only makes sense if this client has live sessions; otherwise
 	// no data will ever arrive and we'd just stall a probe-only request the
 	// caller wants a quick answer to (e.g. Runtime.Probe()).
@@ -401,7 +496,6 @@ func (s *Server) collectUpstreamData(ctx context.Context, clientID string, windo
 		case <-time.After(remaining):
 			return s.drainAllForClient(clientID)
 		}
-		_ = longPoll // signature kept for caller clarity; behaviour is window-driven.
 	}
 }
 

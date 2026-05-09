@@ -31,20 +31,20 @@ func makeRuntime(t *testing.T) *runtime.Runtime {
 	}
 	sealer, _ := crypto.NewSealer(key)
 	ft := &transporttest.Fake{Handler: func(_ context.Context, ct []byte) ([]byte, error) {
-		plain, _ := sealer.Open(ct)
-		env, _ := protocol.DecodeEnvelope(plain)
+		batch, _ := sealer.Open(ct)
+		env, _ := protocol.DecodeEnvelope(batch.Plaintext)
 		out := protocol.Envelope{
-			Version: protocol.Version{Major: 1, Minor: 0}, ClientID: "fake",
+			Version: protocol.Version{Major: 1, Minor: 1}, ClientID: "fake",
 			Compression: protocol.CompressionNone,
 			Messages: []protocol.Message{{
 				Type: protocol.MessageTypeProbe, ProbeID: env.Messages[0].ProbeID,
 				Status:            "ok",
-				SupportedVersions: []protocol.Version{{Major: 1, Minor: 0}},
-				SelectedVersion:   &protocol.Version{Major: 1, Minor: 0},
+				SupportedVersions: []protocol.Version{{Major: 1, Minor: 1}},
+				SelectedVersion:   &protocol.Version{Major: 1, Minor: 1},
 			}},
 		}
 		raw, _ := protocol.EncodeEnvelope(out)
-		return sealer.Seal(raw)
+		return sealer.Seal(out.ClientID, raw)
 	}}
 	rt, err := runtime.New(cfg, ft)
 	if err != nil {

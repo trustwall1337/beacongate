@@ -2,11 +2,11 @@
 
 ## Status
 
-Version: `1.0`
+Version: `1.1` — current. Hard-cuts from `1.0`; v1.0 envelopes are no longer accepted.
 
-This document defines the BeaconGate protocol messages and envelope format carried inside an authenticated encrypted transport batch. It is the normative source for runtime protocol behavior in the initial implementation.
+This document defines the BeaconGate protocol messages and envelope format carried inside an authenticated encrypted transport batch. It is the normative source for runtime protocol behavior.
 
-The transport layer carries opaque encrypted bytes. After decryption, the plaintext batch MUST decode into exactly one BeaconGate envelope as defined here.
+The transport layer carries opaque encrypted bytes. After AEAD decryption, the plaintext batch MUST decode into exactly one BeaconGate envelope as defined here.
 
 ## Design Goals
 
@@ -14,29 +14,64 @@ The transport layer carries opaque encrypted bytes. After decryption, the plaint
 - Keep transport concerns outside session semantics.
 - Make malformed input handling deterministic.
 - Define session behavior before runtime code exists.
+- (v1.1) Make the wire envelope replay-resistant and cryptographically isolated per client.
 
-## Versioning Model
+## Version Model
 
-BeaconGate uses a two-part protocol version:
+BeaconGate carries **two** version concepts, deliberately separate (see plan B6):
 
-- `major`: incompatible wire or semantic changes
-- `minor`: additive or clarifying changes within the same major line
+| Concept | Bytes | Where | Purpose |
+| --- | --- | --- | --- |
+| **Wire-envelope version** | 1 byte cleartext, value `0x01` for v1.1 | First byte of every wire packet, BEFORE the AEAD nonce | Describes the OUTER envelope layout (header shape, AEAD scheme, replay-id placement, per-client key derivation). Bumped only when the wire layout changes. |
+| **Application-protocol version** | `version.major.minor` (uint16 each) inside the JSON envelope | Inside the AEAD plaintext | Describes message-level semantics (message types, session lifecycle). Bumped per the rules below. |
 
-Version `1.0` is the initial protocol defined by this document.
+Decoupling rule: a wire-envelope bump MAY ship without an application-protocol bump, and vice versa. They happen to advance together for v1.1 because per-client key derivation (wire change) and replay protection (wire change) both required new outer-envelope fields.
 
-Compatibility rules:
+Application-protocol version compatibility rules:
 
 - A sender MUST set both `major` and `minor` in every envelope.
 - A receiver MUST reject any envelope whose version is not explicitly supported.
 - A receiver MUST NOT assume forward compatibility with a higher minor version unless that exact version was advertised as supported.
 - A major version change is always incompatible.
-- A minor version change may be compatible in implementation terms, but the runtime MUST treat support as opt-in through explicit version advertisement.
 
-Initial implementation rules:
+v1.1 implementation rules:
 
-- Clients and servers MUST support `1.0`.
-- If version negotiation has not happened yet, a sender MUST use `1.0`.
-- All envelopes in a live session MUST use the same negotiated version.
+- Clients and servers MUST support `1.1`.
+- v1.0 is **rejected** (hard cut). The `0x01` wire-version byte and `1.1` JSON `version.minor` together identify v1.1; any other combination MUST be rejected.
+
+## Wire Envelope (v1.1)
+
+The wire layout, before transport encoding (e.g. base64 for the `appsscript` transport):
+
+```
+[ 1 byte:  wire version = 0x01 ]
+[ 2 bytes: BE client_id length N (max 1024) ]
+[ N bytes: client_id (UTF-8, no NUL) ]
+[ 12 bytes: AEAD nonce (random per Seal call) ]
+[ rest:   AEAD ciphertext + 16-byte tag ]
+```
+
+AEAD parameters:
+
+- Algorithm: AES-256-GCM
+- Key: HKDF-SHA256 derived per-client. `key = HKDF(master_key, salt="beacongate v1.1 per-client", info=client_id, 32 bytes)`.
+- Nonce: 12 random bytes per Seal.
+- AAD: `wire_version || client_id_length_be || client_id` — binds the cleartext header so a captured packet posted with a swapped cleartext client_id fails authentication.
+- Plaintext: `[ 8 bytes BE timestamp_ms ] || [ 16 bytes replay_id ] || [ JSON envelope ]`.
+
+The outer-envelope properties this layout buys:
+
+- **Per-client key isolation.** Compromise of one client's derived key does not expose other clients' traffic. The master key is still operator-shared, but cryptographic isolation between distinct `client_id`s is now real.
+- **AAD-bound client_id.** A captured wire packet whose cleartext client_id is rewritten fails AEAD authentication. The server can derive the correct per-client key from the cleartext header without trusting it for content authentication.
+- **Replay protection.** The 8-byte millisecond timestamp + 16-byte random replay-id combine to make every Seal call produce wire bytes that can be deduplicated server-side. The server-side replay store enforces a ±5min skew window on the timestamp and a 10-minute dedup window on the replay-id.
+- **Idempotent retry.** Within a 60-second response-cache TTL, re-POSTing the exact same wire bytes returns the cached response — making transport-level failover (e.g. the `appsscript` transport's per-batch failover across deployments) safe under retry.
+
+Identity guarantees this layout does NOT provide (see SECURITY.md "What the appsscript transport is and is NOT" for the operator-facing version):
+
+- **Identity authenticity.** The `client_id` is self-asserted in cleartext. Any peer with the master key can claim any `client_id`. Per-client session caps and replay accounting are aggregated against the *claimed* identity, not the real peer.
+- **Conflict detection.** Two peers honestly running the same `client_id` (operator error) or one impersonating another (master-key compromise) look identical to the server.
+
+Per-tenant master keys are tracked as future work (`STEP-6-multitenant.md`).
 
 ## Envelope Structure
 
@@ -316,7 +351,7 @@ Examples below show decrypted plaintext envelopes in JSON for readability. The t
 
 ```json
 {
-  "version": { "major": 1, "minor": 0 },
+  "version": { "major": 1, "minor": 1 },
   "client_id": "client-alpha",
   "transport": "google",
   "compression": "none",
@@ -344,7 +379,7 @@ Examples below show decrypted plaintext envelopes in JSON for readability. The t
 
 ```json
 {
-  "version": { "major": 1, "minor": 0 },
+  "version": { "major": 1, "minor": 1 },
   "client_id": "server-west-1",
   "compression": "none",
   "messages": [
@@ -362,7 +397,7 @@ Examples below show decrypted plaintext envelopes in JSON for readability. The t
 
 ```json
 {
-  "version": { "major": 1, "minor": 0 },
+  "version": { "major": 1, "minor": 1 },
   "client_id": "server-west-1",
   "compression": "none",
   "messages": [
@@ -371,9 +406,9 @@ Examples below show decrypted plaintext envelopes in JSON for readability. The t
       "probe_id": "probe-42",
       "status": "ok",
       "supported_versions": [
-        { "major": 1, "minor": 0 }
+        { "major": 1, "minor": 1 }
       ],
-      "selected_version": { "major": 1, "minor": 0 }
+      "selected_version": { "major": 1, "minor": 1 }
     }
   ]
 }
@@ -381,25 +416,34 @@ Examples below show decrypted plaintext envelopes in JSON for readability. The t
 
 ## Future Compatibility Notes
 
-These items are planned for the next protocol bump (1.1 or 2.0); they do
-not change the 1.0 wire format defined above:
+These items are planned for a future protocol bump (1.2 or 2.0); they do
+not change the 1.1 wire format defined above:
 
-- **Per-client key derivation.** The current envelope is fully encrypted
-  and the sealing key is shared across all clients. A future revision may
-  carry a small cleartext header (just `client_id`) so the server can
-  derive a per-client AEAD key via HKDF before opening the envelope.
-  Compromise of one client's key would then no longer expose other
-  clients' traffic. Until that bump, deployments rotate the master key
-  on suspected compromise.
+- **Per-tenant master keys.** v1.1 derives per-client AEAD keys from one
+  operator-shared master via HKDF. A future revision may provision one
+  master per peer at install time, removing the residual self-asserted-
+  identity issue (see "What the v1.1 wire format does NOT provide").
+  Tracked as `STEP-6-multitenant.md`.
+- **Client-side asymmetric identity.** Per-client Ed25519 keypairs with a
+  signature in the cleartext header would prove identity authenticity,
+  not just isolate keys. Stronger but adds complexity. Park.
+- **Binary inner envelope.** The JSON envelope inside the AEAD is heavy
+  on chatty traffic; a future bump could replace it with a tighter
+  binary frame (matching Goose's wire density). Independent of the
+  outer-envelope wire-version byte.
 
 ## Implementation Traceability
 
-Later runtime code MUST be explainable in terms of this document:
+Runtime code MUST be explainable in terms of this document:
 
-- wire version checks map to Versioning Model
-- decode validation maps to Envelope Structure and Message Structure
-- session state transitions map to Session Lifecycle
-- protocol resets map to Error Semantics
-- pre-session compatibility checks map to Probe and Version Negotiation
+- wire-envelope version byte parsing → "Wire Envelope (v1.1)" (engine/crypto/envelope.go)
+- per-client key derivation → "Wire Envelope (v1.1)" (engine/crypto/envelope.go derivePerClientAEAD)
+- AAD binding → "Wire Envelope (v1.1)" (engine/crypto/envelope.go buildAAD)
+- timestamp + replay-id checks → "Wire Envelope (v1.1)" (engine/replay/store.go)
+- application-protocol version checks → "Version Model" (engine/protocol/version.go)
+- decode validation → "Envelope Structure" + "Message Structure" (engine/protocol/decode.go)
+- session state transitions → "Session Lifecycle" (server/runtime/session.go, client/runtime/sessions.go)
+- protocol resets → "Error Semantics"
+- pre-session compatibility checks → "Probe and Version Negotiation"
 
 Any runtime behavior that cannot be traced back to one of those sections should be treated as unspecified and reviewed before implementation.

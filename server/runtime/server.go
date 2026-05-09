@@ -16,6 +16,8 @@ import (
 
 	"github.com/trustwall1337/beacongate/engine/crypto"
 	"github.com/trustwall1337/beacongate/engine/protocol"
+	"github.com/trustwall1337/beacongate/engine/replay"
+	"github.com/trustwall1337/beacongate/server/internal/limit"
 	"github.com/trustwall1337/beacongate/server/upstream"
 )
 
@@ -29,6 +31,13 @@ const (
 	defaultMaxChunk             = 16 * 1024
 	defaultMaxSessionsPerClient = 100
 	defaultIdleSessionTimeout   = 10 * time.Minute
+
+	// Per-IP rate cap on the /tunnel endpoint (plan D1). Conservative
+	// default sized to comfortably cover a busy interactive client
+	// (long-poll cadence ~25s + occasional bursts) while bounding the
+	// cost a single peer with the shared key can impose.
+	defaultTunnelRatePerSec = 50.0
+	defaultTunnelBurst      = 100
 )
 
 // PolicyDecision is what the policy engine returns for a target. The server
@@ -58,6 +67,16 @@ type Server struct {
 	sealer   *crypto.Sealer
 	dialer   upstream.Dialer
 	policy   PolicyEvaluator
+
+	// replayStore is the v1.1 replay dedup cache (plan B4+B5).
+	// Per-client sharded; lock-bounded; off the request critical
+	// path except for the lookup/insert which are O(1)-ish.
+	replayStore *replay.Store
+
+	// tunnelLimiter caps requests-per-second per remote IP on
+	// /tunnel (plan D1). Defense in depth: even a peer with the
+	// shared key cannot saturate a single server.
+	tunnelLimiter *limit.TokenBucket
 
 	drainWindow          time.Duration
 	longPollWindow       time.Duration
@@ -89,6 +108,8 @@ func New(serverID string, sealer *crypto.Sealer, dialer upstream.Dialer, policy 
 		sealer:               sealer,
 		dialer:               dialer,
 		policy:               policy,
+		replayStore:          replay.New(replay.Defaults()),
+		tunnelLimiter:        limit.New(defaultTunnelRatePerSec, defaultTunnelBurst),
 		drainWindow:          defaultDrainWindow,
 		longPollWindow:       defaultLongPollWindow,
 		maxChunk:             defaultMaxChunk,

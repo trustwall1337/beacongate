@@ -41,16 +41,16 @@ func newFakeServer(sealer *crypto.Sealer) *fakeServer {
 }
 
 func (fs *fakeServer) handle(_ context.Context, ct []byte) ([]byte, error) {
-	plain, err := fs.sealer.Open(ct)
+	batch, err := fs.sealer.Open(ct)
 	if err != nil {
 		return nil, err
 	}
-	env, err := protocol.DecodeEnvelope(plain)
+	env, err := protocol.DecodeEnvelope(batch.Plaintext)
 	if err != nil {
 		return nil, err
 	}
 	out := protocol.Envelope{
-		Version:     protocol.Version{Major: 1, Minor: 0},
+		Version:     protocol.Version{Major: 1, Minor: 1},
 		ClientID:    "fake-server",
 		Compression: protocol.CompressionNone,
 	}
@@ -83,22 +83,22 @@ func (fs *fakeServer) handle(_ context.Context, ct []byte) ([]byte, error) {
 			out.Messages = append(out.Messages, protocol.Message{
 				Type: protocol.MessageTypeProbe, ProbeID: m.ProbeID,
 				Status:            "ok",
-				SupportedVersions: []protocol.Version{{Major: 1, Minor: 0}},
-				SelectedVersion:   &protocol.Version{Major: 1, Minor: 0},
+				SupportedVersions: []protocol.Version{{Major: 1, Minor: 1}},
+				SelectedVersion:   &protocol.Version{Major: 1, Minor: 1},
 			})
 		}
 	}
 	if len(out.Messages) == 0 {
 		out.Messages = append(out.Messages, protocol.Message{
 			Type: protocol.MessageTypeProbe, ProbeID: "noop", Status: "ok",
-			SupportedVersions: []protocol.Version{{Major: 1, Minor: 0}},
+			SupportedVersions: []protocol.Version{{Major: 1, Minor: 1}},
 		})
 	}
 	raw, err := protocol.EncodeEnvelope(out)
 	if err != nil {
 		return nil, err
 	}
-	return fs.sealer.Seal(raw)
+	return fs.sealer.Seal(out.ClientID, raw)
 }
 
 func setupSocks(t *testing.T) (*Server, net.Addr, func()) {

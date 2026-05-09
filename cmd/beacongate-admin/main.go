@@ -31,6 +31,8 @@ func main() {
 		deleteRule()
 	case "status":
 		serverStatus()
+	case "migrate-config":
+		migrateConfig()
 	default:
 		usage()
 	}
@@ -39,10 +41,13 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   beacongate-admin gen-key
-  beacongate-admin list-rules   --addr URL [--token TOKEN]
-  beacongate-admin put-rule     --addr URL [--token TOKEN] --file rule.json
-  beacongate-admin delete-rule  --addr URL [--token TOKEN] --id ID
-  beacongate-admin status       --addr URL [--token TOKEN]`)
+  beacongate-admin list-rules    --addr URL [--token TOKEN]
+  beacongate-admin put-rule      --addr URL [--token TOKEN] --file rule.json
+  beacongate-admin delete-rule   --addr URL [--token TOKEN] --id ID
+  beacongate-admin status        --addr URL [--token TOKEN]
+  beacongate-admin migrate-config --file client_config.json [--dry-run]
+                                  Rewrite a pre-v1.1 client config to the
+                                  v1.1 shape (idempotent).`)
 	os.Exit(2)
 }
 

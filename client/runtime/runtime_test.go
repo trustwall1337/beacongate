@@ -32,11 +32,11 @@ func makeRuntime(t *testing.T, handler func(env protocol.Envelope) protocol.Enve
 	}
 
 	ft := &transporttest.Fake{Handler: func(_ context.Context, ct []byte) ([]byte, error) {
-		plain, err := sealer.Open(ct)
+		batch, err := sealer.Open(ct)
 		if err != nil {
 			return nil, err
 		}
-		env, err := protocol.DecodeEnvelope(plain)
+		env, err := protocol.DecodeEnvelope(batch.Plaintext)
 		if err != nil {
 			return nil, err
 		}
@@ -45,7 +45,7 @@ func makeRuntime(t *testing.T, handler func(env protocol.Envelope) protocol.Enve
 		if err != nil {
 			return nil, err
 		}
-		return sealer.Seal(raw)
+		return sealer.Seal(out.ClientID, raw)
 	}}
 	rt, err := New(cfg, ft)
 	if err != nil {
@@ -58,7 +58,7 @@ func TestExchangeRoundTrip(t *testing.T) {
 	rt := makeRuntime(t, func(env protocol.Envelope) protocol.Envelope {
 		// echo the OPEN with a RESET to keep things minimal
 		return protocol.Envelope{
-			Version:     protocol.Version{Major: 1, Minor: 0},
+			Version:     protocol.Version{Major: 1, Minor: 1},
 			ClientID:    "server",
 			Compression: protocol.CompressionNone,
 			Messages: []protocol.Message{
@@ -94,7 +94,7 @@ func TestProbeReceivesResponse(t *testing.T) {
 	rt := makeRuntime(t, func(env protocol.Envelope) protocol.Envelope {
 		probe := env.Messages[0]
 		return protocol.Envelope{
-			Version:     protocol.Version{Major: 1, Minor: 0},
+			Version:     protocol.Version{Major: 1, Minor: 1},
 			ClientID:    "server",
 			Compression: protocol.CompressionNone,
 			Messages: []protocol.Message{
@@ -102,8 +102,8 @@ func TestProbeReceivesResponse(t *testing.T) {
 					Type:              protocol.MessageTypeProbe,
 					ProbeID:           probe.ProbeID,
 					Status:            "ok",
-					SupportedVersions: []protocol.Version{{Major: 1, Minor: 0}},
-					SelectedVersion:   &protocol.Version{Major: 1, Minor: 0},
+					SupportedVersions: []protocol.Version{{Major: 1, Minor: 1}},
+					SelectedVersion:   &protocol.Version{Major: 1, Minor: 1},
 				},
 			},
 		}

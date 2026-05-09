@@ -31,8 +31,10 @@ func TestProtocolVersionConstants(t *testing.T) {
 		t.Fatalf("expected major version 1, got %d", ProtocolVersionMajor)
 	}
 
-	if ProtocolVersionMinor != 0 {
-		t.Fatalf("expected minor version 0, got %d", ProtocolVersionMinor)
+	// v1.1 hard-cut from v1.0 in this release. v1.0 is no longer
+	// supported by the runtime — see plan B3.
+	if ProtocolVersionMinor != 1 {
+		t.Fatalf("expected minor version 1, got %d", ProtocolVersionMinor)
 	}
 }
 
@@ -44,8 +46,9 @@ func TestProtocolVersionSupport(t *testing.T) {
 		supported bool
 	}{
 		{name: "current version", major: ProtocolVersionMajor, minor: ProtocolVersionMinor, supported: true},
+		{name: "v1.0 (rejected, hard cut)", major: 1, minor: 0, supported: false},
 		{name: "lower major", major: 0, minor: 9, supported: false},
-		{name: "higher minor", major: 1, minor: 1, supported: false},
+		{name: "higher minor", major: 1, minor: 2, supported: false},
 		{name: "higher major", major: 2, minor: 0, supported: false},
 		{name: "zero version", major: 0, minor: 0, supported: false},
 	}

@@ -1,9 +1,25 @@
-// Package google implements the Google-facing HTTPS transport for
-// BeaconGate. It is a dumb forwarder: it carries opaque encrypted batches
-// over an HTTP POST and never inspects the payload. All Google-specific
-// behaviour (fronting host, TLS hardening, etc.) is contained in this
-// package so the rest of the engine stays transport-agnostic.
-package google
+// Package https implements a direct HTTPS POST transport for BeaconGate.
+//
+// IMPORTANT: this is a generic HTTPS transport, NOT a censorship-evasion
+// path. It opens a direct TLS connection to the URL the operator
+// configured and posts encrypted batches there. A network observer sees
+// ordinary HTTPS to whatever hostname is in the configured URL.
+//
+// The censorship-evasion path is implemented separately by the
+// `engine/transport/appsscript` package. That transport tunnels through
+// Google Apps Script so the network path terminates at a real Google IP
+// with SNI=www.google.com.
+//
+// All this package does: dumb forwarder, opaque payload, optional
+// FrontingHost header override, optional pinned TLS roots, TLS 1.3
+// minimum.
+//
+// History: this package was previously named `google` (since v1.0), in
+// the aspirational expectation that it would become the Google-fronted
+// path. It never did — it stayed a generic HTTPS transport. v1.1
+// renamed it to match reality and added the real Apps-Script-tunneled
+// transport as a sibling package.
+package https
 
 import (
 	"bytes"
@@ -21,7 +37,7 @@ import (
 
 const (
 	defaultTimeout    = 30 * time.Second
-	defaultUserAgent  = "beacongate-google/1.0"
+	defaultUserAgent  = "beacongate-https/1.1"
 	contentTypeOpaque = "application/octet-stream"
 )
 
@@ -62,7 +78,7 @@ type Client struct {
 // need to talk to TLS-1.2-only hosts must supply their own HTTPClient.
 func New(cfg Config) (*Client, error) {
 	if cfg.URL == "" {
-		return nil, errors.New("google transport: URL is required")
+		return nil, errors.New("https transport: URL is required")
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = defaultTimeout
@@ -103,7 +119,7 @@ func buildTLSConfig(cfg Config) (*tls.Config, error) {
 	if len(cfg.PinnedRootsPEM) > 0 {
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(cfg.PinnedRootsPEM) {
-			return nil, errors.New("google transport: PinnedRootsPEM contained no usable certificates")
+			return nil, errors.New("https transport: PinnedRootsPEM contained no usable certificates")
 		}
 		tlsCfg.RootCAs = pool
 	}

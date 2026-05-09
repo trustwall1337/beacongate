@@ -1,4 +1,4 @@
-package google
+package https
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 // that want to test reachability without a full Roundtrip.
 func QuickDiagnose(ctx context.Context, url string, timeout time.Duration) (transport.Diagnostics, error) {
 	if url == "" {
-		return transport.Diagnostics{}, errors.New("google transport: url required")
+		return transport.Diagnostics{}, errors.New("https transport: url required")
 	}
 	if timeout == 0 {
 		timeout = defaultTimeout

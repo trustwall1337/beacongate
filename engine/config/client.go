@@ -39,14 +39,28 @@ func (c *ClientConfig) Validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("%w: listen_addr required", ErrInvalidConfig)
 	}
-	if c.Server.URL == "" {
-		return fmt.Errorf("%w: server.url required", ErrInvalidConfig)
-	}
 	if _, err := DecodeKey(c.Server.Key); err != nil {
 		return err
 	}
 	if c.Transport.Type == "" {
 		return fmt.Errorf("%w: transport.type required", ErrInvalidConfig)
+	}
+	// Transport-aware server.url rules. Plan A8: in appsscript mode the
+	// script URL is built from transport.options.script_keys, so
+	// server.url MUST be empty/omitted; the loader fails closed if both
+	// are set so a stale URL can't silently bypass the disguise.
+	switch c.Transport.Type {
+	case "https", "google":
+		if c.Server.URL == "" {
+			return fmt.Errorf("%w: server.url required for transport.type=%q", ErrInvalidConfig, c.Transport.Type)
+		}
+	case "appsscript":
+		if c.Server.URL != "" {
+			return fmt.Errorf("%w: server.url must be empty for transport.type=\"appsscript\" (the script URL is built from transport.options.script_keys; got %q)", ErrInvalidConfig, c.Server.URL)
+		}
+		if c.Transport.Options["script_keys"] == "" {
+			return fmt.Errorf("%w: transport.options.script_keys required for transport.type=\"appsscript\"", ErrInvalidConfig)
+		}
 	}
 	return nil
 }

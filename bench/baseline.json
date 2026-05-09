@@ -1,0 +1,38 @@
+{
+  "_comment": "In-process baseline numbers from `make bench` on Apple M1 Pro, 2026-05-09. Refresh when the reference machine moves more than ~20%. Numbers in ns/op except where noted.",
+  "platform": {
+    "goos": "darwin",
+    "goarch": "arm64",
+    "cpu": "Apple M1 Pro"
+  },
+  "benchmarks": {
+    "RoundtripSmallBatch": {
+      "payload_bytes": 256,
+      "ns_per_op": 89200,
+      "bytes_per_op": 19074,
+      "allocs_per_op": 185
+    },
+    "RoundtripLargeBatch": {
+      "payload_bytes": 65536,
+      "ns_per_op": 562903,
+      "throughput_mb_per_sec": 116.43,
+      "bytes_per_op": 1987103,
+      "allocs_per_op": 329
+    },
+    "RoundtripParallel": {
+      "payload_bytes": 4096,
+      "workers": 10,
+      "ns_per_op": 161009,
+      "bytes_per_op": 174915,
+      "allocs_per_op": 270
+    },
+    "Base64EncodeDecode": {
+      "payload_bytes": 4096,
+      "ns_per_op": 6158,
+      "throughput_mb_per_sec": 665.17,
+      "bytes_per_op": 17152,
+      "allocs_per_op": 3
+    }
+  },
+  "interpretation": "These are BeaconGate-internal numbers only. Real Apps Script p50 will be 100–300 ms on top of these floors due to the Google-edge → Apps Script → VPS network leg. The CI gate is in TestPerformanceAcceptanceFloor (engine/transport/appsscript/bench_test.go) which asserts in-process p95 stays under 100 ms."
+}

@@ -8,12 +8,13 @@ wild.
 ## Reporting a vulnerability
 
 **Please do NOT open a public GitHub issue** for suspected security
-vulnerabilities. Use one of the following private channels instead:
+vulnerabilities. Use **GitHub Private Vulnerability Reporting**: open
+the *Security* tab of this repository and click *Report a vulnerability*.
 
-1. **GitHub Private Vulnerability Reporting** (preferred): open the
-   *Security* tab of this repository and click *Report a vulnerability*.
-2. **Email**: send a description to `security@<your-domain>` (replace with
-   the actual address before publishing this file).
+GitHub will notify the maintainers privately and provide a coordinated-
+disclosure workflow. We prefer this channel because it produces a clean
+audit trail; if you are unable to use it, raise an issue requesting a
+private channel and we will reply with one.
 
 Please include:
 
@@ -58,11 +59,52 @@ Out of scope (please do not file these as security issues):
 
 - The server's default policy refuses to dial private, loopback,
   link-local, multicast, or cloud-metadata addresses (SSRF guard).
-- The Google-fronted client transport enforces TLS 1.3 minimum.
+- Both client transports (`https` and `appsscript`) enforce TLS 1.3
+  minimum.
 - The admin API rate-limits authentication failures (8 / 5 min / IP).
 - Per-client session caps (default 100) and idle-session reaping
   (default 10 min) protect against single-tenant DoS.
-- The wire envelope is AEAD-encrypted with a 32-byte AES-256-GCM key.
+- v1.1 wire envelope: per-client AEAD keys derived from the master
+  via HKDF-SHA256, AAD-bound `client_id` (a captured packet posted
+  with a different cleartext id fails authentication), inner
+  timestamp + 16-byte replay-id, server-side replay-dedup cache with
+  a ±5min skew window and a 60s response-cache for idempotent retry.
 
 If you find a configuration where these defaults are weakened, please
 report it before relying on them.
+
+## What the `appsscript` transport is and is NOT
+
+The `appsscript` transport routes traffic through a user-deployed
+Google Apps Script web app so that, on the network, a passive observer
+sees TLS to a Google IP with `SNI=www.google.com` and HTTP `Host:
+script.google.com`. Blocking this path cleanly requires also blocking
+`script.google.com`, which has collateral damage to legitimate Apps
+Script users. **It raises the cost of blocking; it does not make
+blocking impossible.**
+
+Residual risks NOT eliminated by this transport:
+
+- **Traffic-pattern analysis** — long-poll cadence, payload-size
+  distribution, per-batch timing. A determined adversary with full
+  packet capture can fingerprint these patterns even though the
+  bytes are encrypted.
+- **TLS-fingerprint analysis (JA3 / JA4)** — Go's `crypto/tls`
+  ClientHello differs from common browsers. A motivated DPI vendor
+  may detect non-browser TLS clients to Google.
+- **Google-side classifiers** — Google can see the encrypted bytes
+  pass through Apps Script and could in principle deploy
+  classifiers; the transport only protects against off-Google
+  observers.
+- **URL-pattern blocking** — a censor that targets
+  `script.google.com/macros/s/.../exec` specifically (rather than
+  `script.google.com` wholesale) breaks this path with much less
+  collateral damage.
+- **Per-deployment ToS enforcement** — Google can suspend specific
+  deployments at any time; multi-deployment failover is partial
+  mitigation, not a guarantee.
+
+Do not paraphrase any of this as "undetectable" or "unblockable" in
+documentation, marketing copy, or user-facing UI. The transport's
+honest claim is "looks like Google traffic to network-layer DPI",
+nothing more.

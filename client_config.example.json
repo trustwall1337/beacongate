@@ -6,9 +6,9 @@
     "key": "REPLACE_ME_WITH_BASE64_32_BYTE_KEY=="
   },
   "transport": {
-    "type": "google",
+    "type": "https",
     "options": {
-      "fronting_host": "www.googleapis.com"
+      "fronting_host": ""
     }
   }
 }
