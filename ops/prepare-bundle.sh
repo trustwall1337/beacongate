@@ -141,12 +141,20 @@ check() {
 echo "== BeaconGate phone-side verification =="
 
 # 1. SOCKS5 routes through and returns the server's exit IP.
+# 30s budget: the appsscript transport's per-request floor is ~8s
+# (Apps Script + 302 redirect + sequential POSTs), with outliers up
+# to ~18s under Apps Script tail latency. 30s comfortably covers
+# the worst case while still failing fast when the tunnel is dead.
 check "SOCKS5 reachable + traffic exits via server" \
-  bash -c 'curl -x socks5h://127.0.0.1:1080 -fsS --max-time 10 https://api.ipify.org >/dev/null'
+  bash -c 'curl -x socks5h://127.0.0.1:1080 -fsS --max-time 30 https://api.ipify.org >/dev/null'
 
 # 2. Local control API reports state=connected.
-check "control API state=connected" \
-  bash -c 'state=\$(curl -fsS --max-time 5 http://127.0.0.1:9091/api/status | jq -r .state 2>/dev/null); [[ "\$state" == "connected" ]]'
+# Accept "connected" or "degraded" — degraded is a transient state the
+# pump enters after 3 consecutive idle long-poll deadline misses, and
+# it self-heals on the next successful tick. As long as the tunnel
+# actually works (check #1), degraded is not a deal-breaker.
+check "control API state in {connected, degraded}" \
+  bash -c 'state=\$(curl -fsS --max-time 5 http://127.0.0.1:9091/api/status | jq -r .state 2>/dev/null); [[ "\$state" == "connected" || "\$state" == "degraded" ]]'
 
 # 3. For appsscript mode: zero direct connections to the operator's VPS.
 if [[ -n "\$VPS_IP" ]]; then
