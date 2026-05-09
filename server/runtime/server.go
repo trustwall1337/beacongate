@@ -99,9 +99,14 @@ func (AllowAll) Evaluate(protocol.Target) PolicyDecision {
 // Server holds the per-process state shared across tunnel requests.
 type Server struct {
 	serverID string
-	sealer   *crypto.Sealer
-	dialer   upstream.Dialer
-	policy   PolicyEvaluator
+	// sealers routes inbound wire packets to the per-client Sealer
+	// owning the matching master key. Built from the server config:
+	// single-tenant when ServerConfig.Key is set (legacy mode), or
+	// multi-tenant when ServerConfig.Clients is set (per-friend
+	// allowlist; revocation = drop entry + reload).
+	sealers *crypto.SealerRegistry
+	dialer  upstream.Dialer
+	policy  PolicyEvaluator
 
 	// replayStore is the v1.1 replay dedup cache (plan B4+B5).
 	// Per-client sharded; lock-bounded; off the request critical
@@ -135,13 +140,16 @@ type Server struct {
 	logger atomic.Pointer[slog.Logger]
 }
 
-func New(serverID string, sealer *crypto.Sealer, dialer upstream.Dialer, policy PolicyEvaluator) *Server {
+// New constructs a Server. sealers is the per-client routing layer
+// built from the server config (single-tenant or multi-tenant). For
+// tests, wrap a single Sealer via crypto.SingleKeyRegistryFromSealer.
+func New(serverID string, sealers *crypto.SealerRegistry, dialer upstream.Dialer, policy PolicyEvaluator) *Server {
 	if policy == nil {
 		policy = AllowAll{}
 	}
 	srv := &Server{
 		serverID:             serverID,
-		sealer:               sealer,
+		sealers:              sealers,
 		dialer:               dialer,
 		policy:               policy,
 		replayStore:          replay.New(replay.Defaults()),

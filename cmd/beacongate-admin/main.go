@@ -35,6 +35,8 @@ func main() {
 		migrateConfig()
 	case "export-link":
 		exportLink()
+	case "add-client":
+		addClient()
 	default:
 		usage()
 	}
@@ -54,7 +56,14 @@ func usage() {
                                   Encode a client config into a bg:// share-link.
                                   --qr prints a Unicode-block QR code to stdout;
                                   --qr-png writes a PNG. Treat the link like a
-                                  password — it contains the AES key.`)
+                                  password — it contains the AES key.
+  beacongate-admin add-client     --server-config server_config.json --name NAME [--output PATH]
+                                  Generate a per-friend (client_id, master_key)
+                                  pair, append to the server's allowlist, and
+                                  write a ready-to-import .bg file for the
+                                  friend. Server config must have a
+                                  client_template block. Atomic writes; restart
+                                  the server after to apply.`)
 	os.Exit(2)
 }
 

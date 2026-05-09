@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/trustwall1337/beacongate/engine/crypto"
 	"github.com/trustwall1337/beacongate/engine/protocol"
 )
 
@@ -23,7 +24,7 @@ func TestSameClientIDSharesSessionCap(t *testing.T) {
 	host, port, stop := startEchoUpstream(t)
 	defer stop()
 	sealer := newSealer(t)
-	srv := New("server-test", sealer, testDialer(2*time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(2*time.Second), nil)
 	srv.SetMaxSessionsPerClient(2) // tight cap for the test
 	defer srv.Close()
 	mux := http.NewServeMux()
@@ -77,7 +78,7 @@ func TestPolicyEvaluationIgnoresClientID(t *testing.T) {
 	defer stop()
 	sealer := newSealer(t)
 	// Default AllowAll → everything succeeds regardless of client_id.
-	srv := New("server-test", sealer, testDialer(2*time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(2*time.Second), nil)
 	defer srv.Close()
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())

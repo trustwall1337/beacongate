@@ -48,6 +48,46 @@ func buildLogger(level, format string) *slog.Logger {
 	return slog.New(h)
 }
 
+// buildSealerRegistry constructs the per-client routing registry
+// from the loaded server config. The config validation
+// (engine/config.ServerConfig.validateAuth) guarantees Key and
+// Clients are mutually exclusive but allows the bootstrap state
+// (neither set) for operator-tooling reasons. The runtime is
+// strict: it refuses to start in bootstrap state because a
+// listening server with no auth configured would silently 401
+// every request — a footgun the operator is unlikely to want.
+//
+// In multi-tenant mode each entry's base64 key is decoded into the
+// raw 32-byte master key the registry needs. config.DecodeKey
+// validates the byte length; an invalid key is a config error,
+// surfaced before the server starts listening.
+func buildSealerRegistry(cfg *config.ServerConfig) (*crypto.SealerRegistry, error) {
+	if len(cfg.Clients) > 0 {
+		entries := make([]crypto.MultiKeyEntry, 0, len(cfg.Clients))
+		for _, c := range cfg.Clients {
+			keyBytes, err := config.DecodeKey(c.Key)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, crypto.MultiKeyEntry{
+				ClientID:  c.ClientID,
+				MasterKey: keyBytes,
+			})
+		}
+		return crypto.NewMultiKeyRegistry(entries)
+	}
+	if strings.TrimSpace(cfg.Key) != "" {
+		keyBytes, err := cfg.KeyBytes()
+		if err != nil {
+			return nil, err
+		}
+		return crypto.NewSingleKeyRegistry(keyBytes)
+	}
+	return nil, errors.New("server config has no auth configured: " +
+		"add at least one client with `beacongate-admin add-client --name X` " +
+		"before starting the server")
+}
+
 // policyEvaluator adapts a policy.Engine to runtime.PolicyEvaluator. Living
 // in the binary keeps the dependency direction clean: server/runtime never
 // imports server/policy, and server/policy never imports server/runtime.
@@ -72,13 +112,13 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	keyBytes, err := cfg.KeyBytes()
+	// Build the per-client routing registry. Multi-tenant when the
+	// config has a `clients` allowlist; single-tenant when the
+	// legacy global `key` is set (config validation guarantees
+	// exactly one is set).
+	sealers, err := buildSealerRegistry(cfg)
 	if err != nil {
-		log.Fatalf("key: %v", err)
-	}
-	sealer, err := crypto.NewSealer(keyBytes)
-	if err != nil {
-		log.Fatalf("sealer: %v", err)
+		log.Fatalf("sealer registry: %v", err)
 	}
 
 	engine := policy.NewEngine()
@@ -108,7 +148,10 @@ func main() {
 	if cfg.UpstreamProxy != "" {
 		logger.Info("server.upstream_proxy", "url", cfg.UpstreamProxy)
 	}
-	srv := serverruntime.New(cfg.ServerID, sealer, dialer, policyEvaluator{engine: engine})
+	srv := serverruntime.New(cfg.ServerID, sealers, dialer, policyEvaluator{engine: engine})
+	logger.Info("auth.mode",
+		"multi_tenant", sealers.IsMultiTenant(),
+		"client_count", sealers.Size())
 	srv.SetLogger(logger.With("service", "server", "server_id", cfg.ServerID))
 	if cfg.Limits.MaxSessionsPerClient > 0 {
 		srv.SetMaxSessionsPerClient(cfg.Limits.MaxSessionsPerClient)

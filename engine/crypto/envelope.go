@@ -287,6 +287,40 @@ func (s *Sealer) Open(wire []byte) (*SealedBatch, error) {
 	}, nil
 }
 
+// PeekClientID extracts the cleartext client_id from a v1.1 wire
+// packet without performing any AEAD work. The server uses this to
+// route the packet to a per-client Sealer (engine/crypto.SealerRegistry)
+// before any crypto cost — unknown client_ids in multi-tenant mode are
+// rejected before HKDF and AEAD-Open run.
+//
+// Returns ErrInvalidWire on truncated headers, wrong version byte,
+// empty client_id, or oversized client_id. Does NOT validate the AEAD;
+// the caller must still call Sealer.Open(wire) on the returned route's
+// sealer to authenticate the packet. A captured packet whose cleartext
+// client_id was tampered with will fail Open() because the AAD binds
+// the cleartext id; routing on an attacker-supplied client_id is
+// therefore safe — it picks the wrong key and Open fails.
+func PeekClientID(wire []byte) (string, error) {
+	if len(wire) < 1+ClientIDLenSize {
+		return "", fmt.Errorf("%w: short header (%d bytes)", ErrInvalidWire, len(wire))
+	}
+	if wire[0] != WireVersionV11 {
+		return "", fmt.Errorf("%w: unsupported wire version 0x%02x", ErrInvalidWire, wire[0])
+	}
+	idLen := int(binary.BigEndian.Uint16(wire[1 : 1+ClientIDLenSize]))
+	if idLen == 0 {
+		return "", fmt.Errorf("%w: client_id empty", ErrInvalidWire)
+	}
+	if idLen > MaxClientIDLen {
+		return "", fmt.Errorf("%w: client_id too long (%d > %d)", ErrInvalidWire, idLen, MaxClientIDLen)
+	}
+	headerEnd := 1 + ClientIDLenSize + idLen
+	if len(wire) < headerEnd+AEADNonceSize {
+		return "", fmt.Errorf("%w: short header for client_id len %d", ErrInvalidWire, idLen)
+	}
+	return string(wire[1+ClientIDLenSize : headerEnd]), nil
+}
+
 // buildAAD constructs the AAD that binds wire version + client_id
 // to the AEAD. The exact byte layout MUST match between Seal and
 // Open or authentication breaks; the assert here documents the

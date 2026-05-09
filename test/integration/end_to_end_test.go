@@ -114,7 +114,7 @@ func setup(t *testing.T) *harness {
 		t.Fatal(derr)
 	}
 	dialer.Safety.AllowPrivate = true // integration test uses loopback echo
-	srv := serverruntime.New("server-it", sealer, dialer, &itPolicyEvaluator{engine: engine})
+	srv := serverruntime.New("server-it", crypto.SingleKeyRegistryFromSealer(sealer), dialer, &itPolicyEvaluator{engine: engine})
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
 	mux.Handle("/healthz", srv.Health())

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/trustwall1337/beacongate/engine/crypto"
 	"github.com/trustwall1337/beacongate/engine/protocol"
 )
 
@@ -20,7 +21,7 @@ func TestTunnelIdempotentRetryWithinResponseWindow(t *testing.T) {
 	host, port, stop := startEchoUpstream(t)
 	defer stop()
 	sealer := newSealer(t)
-	srv := New("server-test", sealer, testDialer(2*time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(2*time.Second), nil)
 	defer srv.Close()
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
@@ -62,7 +63,7 @@ func TestTunnelIdempotentRetryWithinResponseWindow(t *testing.T) {
 // AEAD check and return 401, not a more revealing status code.
 func TestTunnelRejectsAADTamperedClientID(t *testing.T) {
 	sealer := newSealer(t)
-	srv := New("server-test", sealer, testDialer(time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(time.Second), nil)
 	defer srv.Close()
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
@@ -101,7 +102,7 @@ func TestTunnelRejectsAADTamperedClientID(t *testing.T) {
 // fingerprinting).
 func TestTunnelRejectsUnknownWireVersion(t *testing.T) {
 	sealer := newSealer(t)
-	srv := New("server-test", sealer, testDialer(time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(time.Second), nil)
 	defer srv.Close()
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())

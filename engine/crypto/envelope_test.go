@@ -240,3 +240,113 @@ func TestKeyCacheReusesDerivation(t *testing.T) {
 		t.Fatalf("expected distinct AEADs for distinct client_ids")
 	}
 }
+
+// --- PeekClientID tests ---
+
+func TestPeekClientIDHappyPath(t *testing.T) {
+	s := newTestSealer(t)
+	wire, err := s.Seal("client-alpha", []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := PeekClientID(wire)
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if got != "client-alpha" {
+		t.Fatalf("client_id mismatch: got %q want %q", got, "client-alpha")
+	}
+}
+
+// TestPeekClientIDDoesNotValidateAEAD pins the documented contract:
+// PeekClientID is a fast routing primitive and MUST NOT do AEAD work.
+// We construct a wire packet whose ciphertext bytes have been mangled
+// — Open() would reject this with ErrAuthenticationFail, but Peek
+// must still return the cleartext client_id so the caller can route
+// to the right Sealer (whose Open() then rejects authentically).
+func TestPeekClientIDDoesNotValidateAEAD(t *testing.T) {
+	s := newTestSealer(t)
+	wire, err := s.Seal("client-beta", []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mangle the last ciphertext byte. Header + cleartext id are
+	// untouched; AEAD verification will fail but Peek should not care.
+	wire[len(wire)-1] ^= 0xFF
+	got, err := PeekClientID(wire)
+	if err != nil {
+		t.Fatalf("peek should ignore ciphertext tampering, got err: %v", err)
+	}
+	if got != "client-beta" {
+		t.Fatalf("client_id mismatch: got %q want %q", got, "client-beta")
+	}
+	// Sanity: Open MUST reject the same packet.
+	if _, err := s.Open(wire); !errors.Is(err, ErrAuthenticationFail) {
+		t.Fatalf("Open should reject tampered ct, got %v", err)
+	}
+}
+
+func TestPeekClientIDRejectsShortHeader(t *testing.T) {
+	for _, n := range []int{0, 1, 2} {
+		_, err := PeekClientID(make([]byte, n))
+		if !errors.Is(err, ErrInvalidWire) {
+			t.Fatalf("len=%d: expected ErrInvalidWire, got %v", n, err)
+		}
+	}
+}
+
+func TestPeekClientIDRejectsUnsupportedVersion(t *testing.T) {
+	wire := []byte{0xEE, 0x00, 0x05, 'a', 'l', 'p', 'h', 'a'}
+	_, err := PeekClientID(wire)
+	if !errors.Is(err, ErrInvalidWire) {
+		t.Fatalf("expected ErrInvalidWire on bad version, got %v", err)
+	}
+}
+
+func TestPeekClientIDRejectsEmptyClientID(t *testing.T) {
+	wire := make([]byte, 4)
+	wire[0] = WireVersionV11
+	// idLen 0x0000 → empty id
+	_, err := PeekClientID(wire)
+	if !errors.Is(err, ErrInvalidWire) {
+		t.Fatalf("expected ErrInvalidWire on empty client_id, got %v", err)
+	}
+}
+
+func TestPeekClientIDRejectsOversizedClientIDLen(t *testing.T) {
+	wire := make([]byte, 4)
+	wire[0] = WireVersionV11
+	wire[1], wire[2] = 0xFF, 0xFF
+	_, err := PeekClientID(wire)
+	if !errors.Is(err, ErrInvalidWire) {
+		t.Fatalf("expected ErrInvalidWire on oversized id len, got %v", err)
+	}
+}
+
+// TestPeekClientIDRejectsTruncatedAfterID covers the case where the
+// header claims an id length that overruns the available bytes
+// before the nonce. A v1.1 packet must include 12 nonce bytes after
+// the cleartext id; truncation there means the packet is malformed.
+func TestPeekClientIDRejectsTruncatedAfterID(t *testing.T) {
+	// 1 ver + 2 idLen + 5 id (no nonce, no ct) = 8 bytes, not enough
+	wire := []byte{WireVersionV11, 0x00, 0x05, 'a', 'l', 'p', 'h', 'a'}
+	_, err := PeekClientID(wire)
+	if !errors.Is(err, ErrInvalidWire) {
+		t.Fatalf("expected ErrInvalidWire on truncated header, got %v", err)
+	}
+}
+
+// BenchmarkPeekClientID measures the fast-path routing cost. In
+// multi-tenant mode this runs once per inbound /tunnel POST before
+// any AEAD work; the cost must be negligible vs the existing per-IP
+// rate limit and replay store lookups (each ~hundreds of ns).
+func BenchmarkPeekClientID(b *testing.B) {
+	s, _ := NewSealer(make([]byte, MasterKeySize))
+	wire, _ := s.Seal("client-alpha", []byte("payload bytes"))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := PeekClientID(wire); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

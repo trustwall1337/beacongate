@@ -76,7 +76,7 @@ func setupLatencyHarness(tb testing.TB, perCallDelay time.Duration) *latencyHarn
 	}
 	dialer.Safety.AllowPrivate = true
 
-	srv := serverruntime.New("server-bench", sealer, dialer, &itPolicyEvaluator{engine: engine})
+	srv := serverruntime.New("server-bench", crypto.SingleKeyRegistryFromSealer(sealer), dialer, &itPolicyEvaluator{engine: engine})
 	if os.Getenv("BG_BENCH_TRACE") == "1" {
 		srv.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	}

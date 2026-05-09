@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/trustwall1337/beacongate/engine/crypto"
 	"github.com/trustwall1337/beacongate/engine/protocol"
 	"github.com/trustwall1337/beacongate/engine/replay"
 )
@@ -39,13 +40,43 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	batch, err := s.sealer.Open(body)
+	// Peek the cleartext client_id and route to the per-client
+	// Sealer BEFORE any AEAD work. In multi-tenant mode an unknown
+	// client_id is rejected here; in single-tenant mode the
+	// registry returns the shared Sealer for any id (legacy
+	// behaviour preserved).
+	//
+	// **Status-code uniformity (security):** every failure mode in
+	// this handler — malformed wire header (PeekClientID), unknown
+	// client_id (Lookup miss), and AEAD authentication failure
+	// (sealer.Open) — returns 401. An external observer probing the
+	// endpoint cannot distinguish "wrong wire version" from "wrong
+	// key" from "client_id not in allowlist", so the auth gate adds
+	// no fingerprintable signal. Detail goes to server logs only.
+	peekedID, err := crypto.PeekClientID(body)
+	if err != nil {
+		s.log().Warn("tunnel.bad_header",
+			"remote_addr", r.RemoteAddr,
+			"error", err.Error())
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sealer := s.sealers.Lookup(peekedID)
+	if sealer == nil {
+		s.log().Warn("tunnel.unknown_client",
+			"remote_addr", r.RemoteAddr,
+			"client_id", peekedID)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	batch, err := sealer.Open(body)
 	if err != nil {
 		// C4: never echo crypto error detail to the wire — it leaks state
 		// useful for fingerprinting (was the body too short? wrong tag?).
 		// Detail goes to server logs, not the client.
 		s.log().Warn("tunnel.auth_failed",
 			"remote_addr", r.RemoteAddr,
+			"client_id", peekedID,
 			"error", err.Error())
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -181,11 +212,16 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "encode response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Seal the response under the server's own client_id. Per-client
-	// key derivation means responses use a *different* AEAD key from
-	// inbound requests (different cleartext id → different HKDF
-	// info), preventing response replay on the request leg.
-	cipher, err := s.sealer.Seal(s.serverID, plain)
+	// Seal the response under the server's own client_id, using the
+	// SAME per-client Sealer that authenticated the request. In
+	// multi-tenant mode this means the friend's per-friend master
+	// key is what derives the outbound AEAD — the friend's client
+	// derives the matching key from the same master key on its end.
+	// Per-client key derivation means responses use a *different*
+	// AEAD key from inbound requests (different cleartext id →
+	// different HKDF info), preventing response replay on the
+	// request leg.
+	cipher, err := sealer.Seal(s.serverID, plain)
 	if err != nil {
 		http.Error(w, "seal", http.StatusInternalServerError)
 		return

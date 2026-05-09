@@ -103,7 +103,7 @@ func TestTunnelOpenAndEcho(t *testing.T) {
 	defer stop()
 
 	sealer := newSealer(t)
-	srv := New("server-test", sealer, testDialer(2*time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(2*time.Second), nil)
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
 	ts := httptest.NewServer(mux)
@@ -156,7 +156,7 @@ func containsData(msgs []protocol.Message, sessID string, want []byte) bool {
 func TestTunnelBadKey(t *testing.T) {
 	srvSealer := newSealer(t)
 	clientSealer := newSealer(t)
-	srv := New("server-test", srvSealer, testDialer(time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(srvSealer), testDialer(time.Second), nil)
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
 	ts := httptest.NewServer(mux)
@@ -188,7 +188,7 @@ func (denyAll) Evaluate(protocol.Target) PolicyDecision {
 
 func TestTunnelPolicyDenyOnOpen(t *testing.T) {
 	sealer := newSealer(t)
-	srv := New("server-test", sealer, testDialer(time.Second), denyAll{})
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(time.Second), denyAll{})
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
 	ts := httptest.NewServer(mux)
@@ -218,7 +218,7 @@ func TestServerCloseTerminatesSessions(t *testing.T) {
 	host, port, stop := startEchoUpstream(t)
 	defer stop()
 	sealer := newSealer(t)
-	srv := New("server-test", sealer, testDialer(time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(time.Second), nil)
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
 	ts := httptest.NewServer(mux)
@@ -243,7 +243,7 @@ func TestServerCloseTerminatesSessions(t *testing.T) {
 
 func TestHealthHandler(t *testing.T) {
 	sealer := newSealer(t)
-	srv := New("s", sealer, testDialer(time.Second), nil)
+	srv := New("s", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(time.Second), nil)
 	rr := httptest.NewRecorder()
 	srv.Health().ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
 	if rr.Code != 200 {
@@ -261,7 +261,7 @@ func TestLongPollWakesOnData(t *testing.T) {
 	host, port, stop := startEchoUpstream(t)
 	defer stop()
 	sealer := newSealer(t)
-	srv := New("server-test", sealer, testDialer(2*time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(2*time.Second), nil)
 	srv.SetLongPollWindow(2 * time.Second)
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
@@ -327,7 +327,7 @@ func TestLongPollCancelDoesNotDrain(t *testing.T) {
 	host, port, stop := startEchoUpstream(t)
 	defer stop()
 	sealer := newSealer(t)
-	srv := New("server-test", sealer, testDialer(2*time.Second), nil)
+	srv := New("server-test", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(2*time.Second), nil)
 	srv.SetLongPollWindow(2 * time.Second)
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
@@ -407,7 +407,7 @@ func mustSeal(t *testing.T, s *crypto.Sealer, env protocol.Envelope) []byte {
 func TestServerContextCancelOnDial(t *testing.T) {
 	sealer := newSealer(t)
 	// 192.0.2.0/24 is TEST-NET; will time out.
-	srv := New("s", sealer, testDialer(50*time.Millisecond), nil)
+	srv := New("s", crypto.SingleKeyRegistryFromSealer(sealer), testDialer(50*time.Millisecond), nil)
 	mux := http.NewServeMux()
 	mux.Handle("/tunnel", srv.Tunnel())
 	ts := httptest.NewServer(mux)
