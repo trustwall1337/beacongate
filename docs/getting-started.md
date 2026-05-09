@@ -618,12 +618,86 @@ From your laptop, get it to your friend's phone. Pick whichever channel is appro
 
 ## Step 15 — Phone-side end-user setup
 
-This is **your friend's part**. Send them the link to [docs/android-termux.md](android-termux.md) — that's the canonical end-user doc. Quick version:
+This is **your friend's part**. There are two ways to do this:
 
-### 15.1 Termux
+- **(A) One-paste install** (recommended) — operator generates a single command (or QR code), friend pastes/scans it once in Termux, done. ~3 taps total.
+- **(B) Manual bundle unpack** — operator sends the `.zip` from Step 12, friend runs ~6 commands. The fallback if the friend can't reach github.com from Termux directly.
 
-1. Install Termux **from F-Droid** (NOT Google Play — the Play version is outdated and may not support `termux-api`).
-   - F-Droid app: <https://f-droid.org/packages/com.termux/>
+### Path A — One-paste install (recommended)
+
+The operator runs `beacongate-admin export-link` with a flag that produces a single shell command (or a PNG QR code containing that command) bundling the friend's config and the binary download in one. The friend scans/pastes once.
+
+#### A.1 Operator generates the install QR
+
+> **Prerequisite:** the repo must have at least one published GitHub Release with the `BeaconGate-<tag>-android-arm64.tar.gz` archive uploaded (the release pipeline at [`.github/workflows/release.yml`](../.github/workflows/release.yml) does this on every `v*` tag push). The Termux installer downloads the binary from there.
+
+On your laptop or VPS:
+
+```sh
+beacongate-admin export-link \
+  --config client_config.json \
+  --install-qr-png /tmp/install-qr.png
+
+# stdout: the bare bg:// link (treat as sensitive)
+# stderr: a sensitive-data warning + "install-cmd qr png written to /tmp/install-qr.png"
+```
+
+Or to get a Unicode-block QR straight in your terminal:
+
+```sh
+beacongate-admin export-link --config client_config.json --install-qr
+```
+
+Send `/tmp/install-qr.png` to the friend over an end-to-end encrypted channel (Signal, in person on a USB stick, etc.). **The QR contains the AES key — treat it like a password.**
+
+> The QR encodes a `curl … | bash -s -- --import "bg://…"` line, around ~600 characters. Phone cameras decode this reliably under indoor lighting in a Version-25 QR.
+
+#### A.2 Friend installs Termux
+
+1. Install Termux **from F-Droid** (NOT Google Play — the Play version is outdated):
+   - <https://f-droid.org/packages/com.termux/>
+2. Open Termux.
+
+#### A.3 Friend scans the QR
+
+1. Friend points their phone camera (or any QR scanner) at the PNG you sent. The scanner detects text starting with `curl -fsSL …`.
+2. Friend taps **Copy** (or "Share to Termux" if their scanner supports Android intents).
+3. Friend pastes into Termux (long-press → Paste) and hits Enter.
+
+That single line:
+
+- Installs Termux deps (`curl`, `unzip`, `jq`, `termux-api`)
+- Asks Android for storage permission (one-time)
+- Resolves the latest BeaconGate release tag from GitHub
+- Downloads `beacongate-client-android-arm64` from that release
+- Decodes the bg:// share-link → writes `client_config.json`
+- Runs `termux-wake-lock` so Android's battery optimizer doesn't kill it
+- Starts the client in the background
+- Waits for preflight, prints next-step instructions
+
+Total time: ~30–60 seconds depending on phone network. The script prints a clear "✅ BeaconGate is running" banner with the SOCKS5 address when ready, or a friendly error message with what went wrong.
+
+#### A.4 Wire up NekoBox or v2rayNG
+
+Same as Path B step 15.4 below — install from F-Droid, point a SOCKS5 inbound at `127.0.0.1:1080`, tap Connect.
+
+#### A.5 Confirm
+
+```sh
+# On the phone, in Termux:
+curl -x socks5h://127.0.0.1:1080 https://api.ipify.org
+# expected: prints YOUR.VPS.IP (NOT the phone's mobile-data IP)
+```
+
+---
+
+### Path B — Manual bundle unpack (fallback)
+
+Use this if the friend's network can't reach github.com directly (some censors block GitHub) or the `--install-qr-png` flow has any issue. Send them [docs/android-termux.md](android-termux.md) — the canonical end-user doc — and the bundle from Step 12.
+
+#### B.1 Termux
+
+1. Install Termux **from F-Droid** (NOT Google Play): <https://f-droid.org/packages/com.termux/>
 2. Open Termux. First-run housekeeping:
    ```sh
    pkg update && pkg upgrade
@@ -631,7 +705,7 @@ This is **your friend's part**. Send them the link to [docs/android-termux.md](a
    termux-setup-storage    # grants Termux access to /sdcard, then ~/storage symlinks
    ```
 
-### 15.2 Verify and unpack the bundle
+#### B.2 Verify and unpack the bundle
 
 The phone has the zip somewhere — usually in `~/storage/downloads/` (where Android put it after the file transfer).
 
@@ -648,7 +722,7 @@ cd ~/beacongate
 chmod +x beacongate-client-android-arm64
 ```
 
-### 15.3 Start the client
+#### B.3 Start the client
 
 ```sh
 # CRITICAL: prevents Android's battery optimizer from killing Termux
@@ -665,11 +739,9 @@ sleep 10
 # Run the verify.sh self-test:
 bash verify.sh
 # expected: "3 passed, 0 failed"
-# (or 2/3 if there's a transient curl timeout — re-run; the wake from cold
-#  takes longer than warmed-up reuse)
 ```
 
-### 15.4 Wire up NekoBox or v2rayNG
+#### B.4 Wire up NekoBox or v2rayNG
 
 The client is now a SOCKS5 server on `127.0.0.1:1080`. Point a SOCKS5 client at it:
 
@@ -683,13 +755,12 @@ The client is now a SOCKS5 server on `127.0.0.1:1080`. Point a SOCKS5 client at 
 
 **v2rayNG**: similar idea, see [docs/android-termux.md](android-termux.md) for the exact field-by-field setup.
 
-### 15.5 Confirm it's working
+#### B.5 Confirm
 
 ```sh
 # On the phone, in Termux:
 curl -x socks5h://127.0.0.1:1080 https://api.ipify.org
-# expected: prints YOUR.VPS.IP (the VPS public IP, NOT the phone's mobile-data IP)
-# if it prints the phone's mobile-data IP, traffic isn't routing through the tunnel
+# expected: prints YOUR.VPS.IP (NOT the phone's mobile-data IP)
 ```
 
 ---

@@ -116,13 +116,35 @@ curl -fsSL https://raw.githubusercontent.com/trustwall1337/beacongate/main/scrip
 
 ### Client side (your laptop or your friend's Android)
 
-**Recommended path — share-link / QR code:**
+**Easiest end-user path — one-paste Termux install (Android):**
+
+The cleanest flow — friend scans a QR you generate, pastes once into Termux, the phone is tunneling. No bundle to ship, no manual unpack:
 
 ```sh
 # On the operator's machine, after configuring client_config.json:
+beacongate-admin export-link --config client_config.json --install-qr-png /tmp/install-qr.png
+# writes a PNG QR encoding a one-paste curl|bash command that:
+#   1. installs Termux deps
+#   2. downloads the latest beacongate-client-android-arm64 from GitHub Releases
+#   3. applies the embedded bg:// config link
+#   4. starts the client with termux-wake-lock
+# Send the PNG to the friend over Signal / in person / etc.
+```
+
+The friend opens Termux, scans the QR, pastes once, and BeaconGate is running. They then open NekoBox or v2rayNG and point a SOCKS5 inbound at `127.0.0.1:1080`. The full walkthrough is in [docs/getting-started.md §15](docs/getting-started.md#step-15--phone-side-end-user-setup) (Path A).
+
+> Requires at least one published GitHub Release with the
+> `BeaconGate-<tag>-android-arm64.tar.gz` archive uploaded — the release pipeline
+> at [.github/workflows/release.yml](.github/workflows/release.yml) does this on
+> every `v*` tag push. If you haven't tagged a release yet, use the bundle path
+> below instead.
+
+**Share-link / QR code (config only — friend has the binary already):**
+
+```sh
 beacongate-admin export-link --config client_config.json --qr
-# prints: bg://config?d=... + a Unicode-block QR
-# also: --qr-png /path/to/qr.png to write a PNG file
+# prints: bg://config?d=... + a Unicode-block QR (config only, no binary download)
+# also: --qr-png /path/to/qr.png for a PNG file
 ```
 
 The friend pastes the link (or scans the QR with their phone camera):
@@ -145,10 +167,12 @@ beacongate-client -config client_config.json -control-addr 127.0.0.1:9091
 curl -x socks5h://127.0.0.1:1080 https://example.com
 ```
 
-For the **Android end-user flow** (Termux + NekoBox/v2rayNG), see
+For the **bundle-based Android handoff** (operator builds a `.zip` with
+binary + config + verify.sh, ships it manually) see
 [docs/operator-handoff-checklist.md](docs/operator-handoff-checklist.md)
 on the operator side and [docs/android-termux.md](docs/android-termux.md)
-on the user side.
+on the user side. Use this if your friend's network can't reach
+github.com directly from Termux.
 
 For the **full server deployment** with reverse-proxy TLS, systemd, and
 Docker Compose, see [docs/deployment.md](docs/deployment.md).
