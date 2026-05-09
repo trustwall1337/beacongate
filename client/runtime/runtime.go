@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync/atomic"
 
 	"github.com/trustwall1337/beacongate/engine/config"
@@ -19,6 +21,9 @@ import (
 
 var ErrClosed = errors.New("client runtime: closed")
 
+// discardLogger is the silent default; SetLogger replaces it with a real one.
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
 // Runtime owns the per-process client state. It is safe for concurrent use.
 type Runtime struct {
 	cfg       *config.ClientConfig
@@ -27,6 +32,8 @@ type Runtime struct {
 
 	closed  atomic.Bool
 	counter atomic.Uint64
+
+	logger atomic.Pointer[slog.Logger]
 }
 
 // New builds a Runtime from a validated client config and a constructed
@@ -46,8 +53,21 @@ func New(cfg *config.ClientConfig, t transport.ClientTransport) (*Runtime, error
 	if err != nil {
 		return nil, err
 	}
-	return &Runtime{cfg: cfg, sealer: sealer, transport: t}, nil
+	rt := &Runtime{cfg: cfg, sealer: sealer, transport: t}
+	rt.logger.Store(discardLogger)
+	return rt, nil
 }
+
+// SetLogger installs a structured logger. Pass nil to silence.
+func (r *Runtime) SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = discardLogger
+	}
+	r.logger.Store(l)
+}
+
+// Log returns the current logger. Always non-nil.
+func (r *Runtime) Log() *slog.Logger { return r.logger.Load() }
 
 // Exchange wraps a list of outbound messages in an envelope, encrypts and
 // sends them, then decrypts and decodes the server's reply.

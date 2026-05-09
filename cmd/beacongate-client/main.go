@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,15 +24,43 @@ import (
 	"github.com/trustwall1337/beacongate/engine/transport/google"
 )
 
+// buildLogger constructs a slog.Logger writing to stderr at the requested
+// level (debug|info|warn|error) in the requested format (text|json).
+func buildLogger(level, format string) *slog.Logger {
+	var lvl slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	opts := &slog.HandlerOptions{Level: lvl}
+	var h slog.Handler = slog.NewTextHandler(os.Stderr, opts)
+	if strings.EqualFold(format, "json") {
+		h = slog.NewJSONHandler(os.Stderr, opts)
+	}
+	return slog.New(h)
+}
+
 func main() {
 	cfgPath := flag.String("config", "client_config.json", "path to client config JSON")
 	controlAddr := flag.String("control-addr", "", "local control HTTP listen address (e.g. 127.0.0.1:9091)")
+	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
+	logFormat := flag.String("log-format", "text", "log format: text|json")
 	flag.Parse()
+
+	logger := buildLogger(*logLevel, *logFormat)
+	slog.SetDefault(logger)
 
 	cfg, err := config.LoadClient(*cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	clientLogger := logger.With("service", "client", "client_id", cfg.ClientID)
 
 	tr, err := buildTransport(cfg)
 	if err != nil {
@@ -40,6 +70,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("runtime: %v", err)
 	}
+	rt.SetLogger(clientLogger)
 	defer rt.Close()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -48,7 +79,10 @@ func main() {
 	diagCtx, dcancel := context.WithTimeout(ctx, 10*time.Second)
 	report := rt.RunStartupDiagnostics(diagCtx)
 	dcancel()
-	log.Printf("startup diagnostics: transport.healthy=%v probe.ok=%v err=%q", report.Transport.Healthy, report.ProbeOK, report.ProbeErr)
+	clientLogger.Info("startup.diagnostics",
+		"transport_healthy", report.Transport.Healthy,
+		"probe_ok", report.ProbeOK,
+		"probe_err", report.ProbeErr)
 
 	pump := clientruntime.NewPump(rt)
 	pump.Start()
@@ -60,23 +94,23 @@ func main() {
 	}
 	go func() {
 		if err := srv.ListenAndServe(cfg.ListenAddr); err != nil {
-			log.Printf("socks server: %v", err)
+			clientLogger.Error("socks.serve_failed", "error", err.Error())
 		}
 	}()
-	log.Printf("beacongate-client listening on %s", cfg.ListenAddr)
+	clientLogger.Info("startup.listening", "addr", cfg.ListenAddr)
 
 	if *controlAddr != "" {
 		api := control.New(rt)
 		go func() {
-			log.Printf("control API listening on %s", *controlAddr)
+			clientLogger.Info("control_api.listening", "addr", *controlAddr)
 			if err := http.ListenAndServe(*controlAddr, api.Handler()); err != nil {
-				log.Printf("control api: %v", err)
+				clientLogger.Error("control_api.failed", "error", err.Error())
 			}
 		}()
 	}
 
 	<-ctx.Done()
-	log.Printf("shutting down")
+	clientLogger.Info("shutting_down")
 	srv.Close()
 }
 

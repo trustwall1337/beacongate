@@ -1,0 +1,5 @@
+# Live config carries the AEAD key; never commit.
+config/server_config.json
+
+# But keep the directory itself tracked.
+!config/.gitkeep

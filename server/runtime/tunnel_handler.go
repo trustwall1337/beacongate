@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -29,12 +31,17 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		// C4: never echo crypto error detail to the wire — it leaks state
 		// useful for fingerprinting (was the body too short? wrong tag?).
 		// Detail goes to server logs, not the client.
+		s.log().Warn("tunnel.auth_failed",
+			"remote_addr", r.RemoteAddr,
+			"error", err.Error())
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	env, err := protocol.DecodeEnvelope(plaintext)
 	if err != nil {
-		// C4: same reasoning — generic 400, log details server-side only.
+		s.log().Warn("tunnel.bad_envelope",
+			"remote_addr", r.RemoteAddr,
+			"error", err.Error())
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -137,6 +144,10 @@ func (s *Server) handleOpen(ctx context.Context, clientID string, m protocol.Mes
 	live := len(s.byClient[clientID])
 	s.mu.Unlock()
 	if cap > 0 && live >= cap {
+		s.log().Warn("session.quota_exceeded",
+			"client_id", clientID,
+			"session_id", m.SessionID,
+			"live", live, "cap", cap)
 		return []protocol.Message{{
 			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
 			Code:   "POLICY_DENIED",
@@ -144,6 +155,11 @@ func (s *Server) handleOpen(ctx context.Context, clientID string, m protocol.Mes
 		}}
 	}
 	if d := s.currentPolicy().Evaluate(target); !d.Allowed {
+		s.log().Warn("session.policy_denied",
+			"client_id", clientID,
+			"session_id", m.SessionID,
+			"target", net.JoinHostPort(target.Host, fmt.Sprintf("%d", target.Port)),
+			"reason", d.Reason)
 		return []protocol.Message{{
 			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
 			Code:   "POLICY_DENIED",
@@ -156,10 +172,21 @@ func (s *Server) handleOpen(ctx context.Context, clientID string, m protocol.Mes
 	if err != nil {
 		// C4: dial errors can carry internal IPs / DNS state. Log full
 		// detail server-side; ship a stable code to the client.
+		code := classifyDialError(err)
+		level := slog.LevelInfo
+		if code == "blocked" {
+			level = slog.LevelWarn // SSRF guard caught this — operator should see it
+		}
+		s.log().Log(ctx, level, "session.dial_failed",
+			"client_id", clientID,
+			"session_id", m.SessionID,
+			"target", net.JoinHostPort(target.Host, fmt.Sprintf("%d", target.Port)),
+			"code", code,
+			"error", err.Error())
 		return []protocol.Message{{
 			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
 			Code:   "DIAL_FAILED",
-			Reason: classifyDialError(err),
+			Reason: code,
 		}}
 	}
 	ss := &serverSession{
@@ -170,6 +197,10 @@ func (s *Server) handleOpen(ctx context.Context, clientID string, m protocol.Mes
 		lastActivity: time.Now(),
 	}
 	s.register(ss)
+	s.log().Info("session.open",
+		"client_id", clientID,
+		"session_id", m.SessionID,
+		"target", net.JoinHostPort(target.Host, fmt.Sprintf("%d", target.Port)))
 	go s.readUpstream(ss)
 	return nil
 }
@@ -206,9 +237,17 @@ func (s *Server) handleData(clientID string, m protocol.Message) []protocol.Mess
 	ss.mu.Lock()
 	expected := ss.nextRecvSeq
 	if m.Seq == nil || *m.Seq != expected {
+		got := uint64(0)
+		if m.Seq != nil {
+			got = *m.Seq
+		}
 		ss.mu.Unlock()
 		ss.terminate(fmt.Errorf("bad sequence: want %d", expected))
 		s.unregister(clientID, m.SessionID)
+		s.log().Warn("session.bad_sequence",
+			"client_id", clientID,
+			"session_id", m.SessionID,
+			"expected_seq", expected, "got_seq", got)
 		return []protocol.Message{{
 			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
 			Code: "BAD_SEQUENCE", Reason: "out of order DATA",
@@ -286,6 +325,14 @@ func (s *Server) readUpstream(ss *serverSession) {
 			ss.mu.Unlock()
 			// Wake long-poll so it observes the terminal state (CLOSE/done).
 			s.notify(ss.clientID)
+			if err == io.EOF {
+				s.log().Info("session.upstream_eof",
+					"client_id", ss.clientID, "session_id", ss.id)
+			} else {
+				s.log().Info("session.upstream_error",
+					"client_id", ss.clientID, "session_id", ss.id,
+					"error", err.Error())
+			}
 			return
 		}
 	}

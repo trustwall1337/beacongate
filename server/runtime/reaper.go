@@ -62,5 +62,7 @@ func (s *Server) reapOnce() {
 		v.ss.terminate(errReaped)
 		s.unregister(v.clientID, v.sessionID)
 		s.notify(v.clientID)
+		s.log().Info("session.reaped",
+			"client_id", v.clientID, "session_id", v.sessionID)
 	}
 }

@@ -1,15 +1,31 @@
-version: "3.8"
+# BeaconGate relay server, single-node deployment.
+#
+# Run:
+#   make docker-up      from the repo root (handles config bootstrap)
+# or:
+#   docker compose -f ops/docker/docker-compose.yml up -d
+#   (only after ops/docker/config/server_config.json exists)
+#
+# In production, front this with TLS via a reverse proxy (Caddy, nginx,
+# Cloudflare). The container speaks plain HTTP on :8080.
 
 services:
   beacongate-server:
     build:
       context: ../..
       dockerfile: ops/docker/Dockerfile.server
+    image: beacongate-server:local
     container_name: beacongate-server
     restart: unless-stopped
     ports:
+      # The tunnel endpoint. Front this with TLS in production.
       - "8080:8080"
-      - "127.0.0.1:9090:9090"
+      # Admin API is disabled in the default config. To enable: set
+      # `admin.token` in your server_config.json and uncomment below.
+      # The default policy is loopback-only auth, which does NOT work
+      # through Docker's port forwarding — token mode is required when
+      # exposing admin from a container.
+      # - "127.0.0.1:9090:9090"
     volumes:
       - ./config:/etc/beacongate:ro
       - beacongate-state:/var/lib/beacongate
@@ -18,6 +34,21 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 5s
+    labels:
+      org.opencontainers.image.title: "beacongate-server"
+      app.kubernetes.io/component: "relay"
+    # Drop unneeded Linux capabilities. The server only needs to listen
+    # on a high port and make outbound connections.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Bound resource use to a sane single-node default. Tune for your host.
+    mem_limit: 256m
+    pids_limit: 256
 
 volumes:
   beacongate-state:
+    labels:
+      app.kubernetes.io/component: "relay-policy-store"

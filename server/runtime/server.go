@@ -6,15 +6,22 @@ package runtime
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/trustwall1337/beacongate/engine/crypto"
 	"github.com/trustwall1337/beacongate/engine/protocol"
 	"github.com/trustwall1337/beacongate/server/upstream"
 )
+
+// discardLogger is the default logger used when the operator hasn't wired
+// one in. Logs go nowhere; tests stay quiet.
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 const (
 	defaultDrainWindow          = 25 * time.Millisecond
@@ -66,6 +73,11 @@ type Server struct {
 	stopCh    chan struct{}
 	stopOnce  sync.Once
 	reaperWG  sync.WaitGroup
+
+	// logger is read-mostly via atomic.Pointer so the hot path doesn't take
+	// s.mu just to access it. Default is a no-op; SetLogger swaps in a real
+	// one before traffic starts.
+	logger atomic.Pointer[slog.Logger]
 }
 
 func New(serverID string, sealer *crypto.Sealer, dialer upstream.Dialer, policy PolicyEvaluator) *Server {
@@ -86,9 +98,23 @@ func New(serverID string, sealer *crypto.Sealer, dialer upstream.Dialer, policy 
 		signals:              map[string]chan struct{}{},
 		stopCh:               make(chan struct{}),
 	}
+	srv.logger.Store(discardLogger)
 	srv.startReaper()
 	return srv
 }
+
+// SetLogger installs a structured logger. Pass slog.Default() for stdlib
+// behaviour, or a custom slog.Logger for JSON / file output. Passing nil
+// silences the runtime.
+func (s *Server) SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = discardLogger
+	}
+	s.logger.Store(l)
+}
+
+// log returns the current logger, never nil.
+func (s *Server) log() *slog.Logger { return s.logger.Load() }
 
 // SetLongPollWindow overrides the default 25s server-hold time. Useful for
 // tests that want a tighter bound on test runtime; production should leave

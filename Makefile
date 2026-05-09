@@ -1,7 +1,8 @@
 .PHONY: all ci clean help \
         go-build go-test go-race go-vet go-fmt go-fmt-check go-lint go-tidy \
         build test race vet fmt fmt-check lint tidy \
-        desktop-build desktop-test mobile-build mobile-test
+        desktop-build desktop-test mobile-build mobile-test \
+        docker-build docker-init docker-up docker-down docker-logs docker-status docker-clean
 
 # Top-level orchestrator for the BeaconGate monorepo. Each language subtree
 # has its own targets; the root targets without a prefix delegate to the Go
@@ -33,6 +34,15 @@ help:
 	@echo "Future subtree targets (no-ops until the subtree exists):"
 	@echo "  make desktop-build, desktop-test"
 	@echo "  make mobile-build, mobile-test"
+	@echo ""
+	@echo "Docker (server only):"
+	@echo "  make docker-up      - bootstrap config + build + start (one-shot)"
+	@echo "  make docker-down    - stop, keep config + policy store"
+	@echo "  make docker-logs    - tail server logs"
+	@echo "  make docker-status  - compose ps + healthz reachability"
+	@echo "  make docker-clean   - stop + delete the policy store volume"
+	@echo "  make docker-build   - build the image only"
+	@echo "  make docker-init    - generate config (idempotent)"
 
 # --- Go subtree ---------------------------------------------------------
 
@@ -106,3 +116,70 @@ clean:
 # ci runs every check the CI job runs locally.
 ci: go-fmt-check go-vet go-build go-test go-race
 	@echo "ci passed"
+
+# --- Docker (server only) ----------------------------------------------
+#
+# All docker-* targets operate on ops/docker/docker-compose.yml. The image
+# is built from this repo's Go source. The client and admin CLI run on
+# the operator's laptop, NOT in the container.
+
+DOCKER_COMPOSE ?= docker compose
+COMPOSE_FILE = ops/docker/docker-compose.yml
+DOCKER_CONFIG_DIR = ops/docker/config
+DOCKER_CONFIG_FILE = $(DOCKER_CONFIG_DIR)/server_config.json
+DOCKER_CONFIG_TEMPLATE = ops/docker/server_config.template.json
+
+docker-build:
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) build
+
+# docker-init generates ops/docker/config/server_config.json with a fresh
+# AEAD key. Idempotent: re-running with an existing config is a no-op so
+# you cannot accidentally rotate the key by re-running docker-up.
+docker-init:
+	@if [ -f "$(DOCKER_CONFIG_FILE)" ]; then \
+		echo "$(DOCKER_CONFIG_FILE) exists; not overwriting (delete it to rotate the key)"; \
+		exit 0; \
+	fi
+	@if [ ! -f "$(DOCKER_CONFIG_TEMPLATE)" ]; then \
+		echo "missing template: $(DOCKER_CONFIG_TEMPLATE)"; \
+		exit 1; \
+	fi
+	@mkdir -p $(DOCKER_CONFIG_DIR)
+	@$(GO) build -o $(BIN)/beacongate-admin ./cmd/beacongate-admin
+	@KEY=$$($(BIN)/beacongate-admin gen-key) && \
+		sed "s|KEY_PLACEHOLDER|$$KEY|" $(DOCKER_CONFIG_TEMPLATE) > $(DOCKER_CONFIG_FILE) && \
+		chmod 600 $(DOCKER_CONFIG_FILE)
+	@echo "wrote $(DOCKER_CONFIG_FILE) (mode 600)"
+	@echo "the AEAD key is in that file — back it up before sharing the host"
+
+docker-up: docker-init
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) up -d --build
+	@echo "waiting for healthcheck..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		status=$$(docker inspect --format='{{.State.Health.Status}}' beacongate-server 2>/dev/null || echo unknown); \
+		case "$$status" in \
+			healthy) echo "server healthy"; exit 0 ;; \
+			unhealthy) echo "server reported unhealthy:"; \
+				$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) logs --tail=30 beacongate-server; exit 1 ;; \
+			*) sleep 3 ;; \
+		esac; \
+	done; \
+	echo "still not healthy after 30s; recent logs:"; \
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) logs --tail=30 beacongate-server; \
+	exit 1
+
+docker-down:
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) down
+
+docker-logs:
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) logs -f beacongate-server
+
+docker-status:
+	@$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) ps
+	@echo ""
+	@printf "host  -> container healthz: "
+	@if curl -fs --max-time 3 http://127.0.0.1:8080/healthz >/dev/null 2>&1; then echo "ok"; else echo "FAIL"; fi
+
+docker-clean:
+	$(DOCKER_COMPOSE) -f $(COMPOSE_FILE) down -v
+	@echo "container and policy-store volume removed; live config kept (delete $(DOCKER_CONFIG_FILE) to rotate the key)"

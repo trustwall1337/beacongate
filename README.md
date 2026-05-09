@@ -72,11 +72,11 @@ TLS termination, systemd, Docker Compose, and recovery tips.
 
 ## Documentation
 
+- [docs/architecture.md](docs/architecture.md) — system overview, glossary, diagrams (start here)
 - [docs/protocol.md](docs/protocol.md) — wire protocol v1.0
 - [docs/admin-api.md](docs/admin-api.md) — admin API surface
 - [docs/policy.md](docs/policy.md) — policy model and evaluation order
 - [docs/deployment.md](docs/deployment.md) — operator guide
-- [docs/planning/PLAN.md](docs/planning/PLAN.md) — master plan
 - [SECURITY.md](SECURITY.md) — vulnerability reporting
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contributor guide
 

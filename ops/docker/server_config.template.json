@@ -1,0 +1,25 @@
+{
+  "server_id": "beacongate-docker",
+  "listen_addr": ":8080",
+  "tunnel_path": "/tunnel",
+  "health_path": "/healthz",
+  "key": "KEY_PLACEHOLDER",
+  "policy": {
+    "baseline_enabled": true,
+    "store_path": "/var/lib/beacongate/policy.json"
+  },
+  "admin": {
+    "enabled": false,
+    "listen_addr": ":9090",
+    "token": ""
+  },
+  "safety": {
+    "allow_private": false,
+    "allow_metadata": false,
+    "extra_blocked": []
+  },
+  "limits": {
+    "max_sessions_per_client": 100,
+    "idle_session_timeout_seconds": 600
+  }
+}

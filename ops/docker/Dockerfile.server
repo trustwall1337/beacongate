@@ -1,14 +1,52 @@
+# syntax=docker/dockerfile:1.7
+
+# ---- build stage --------------------------------------------------------
 FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY go.mod ./
-RUN go mod download || true
-COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/beacongate-server ./cmd/beacongate-server
 
+# Copy module manifests first so the dependency layer caches independently
+# of source changes. We don't have a go.sum yet (zero external deps); when
+# we add one, this COPY picks it up automatically.
+COPY go.mod ./
+COPY go.sum* ./
+RUN go mod download
+
+# Now the source.
+COPY . .
+
+# Build server and admin binaries. The client is intentionally NOT built
+# into this image — clients run on user laptops, not in the relay
+# container.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+        -o /out/beacongate-server ./cmd/beacongate-server \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+        -o /out/beacongate-admin  ./cmd/beacongate-admin
+
+# ---- runtime stage ------------------------------------------------------
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates && adduser -D -H -u 10001 beacongate
+
+# OCI metadata so registries / scanners can identify the image.
+LABEL org.opencontainers.image.title="beacongate-server"
+LABEL org.opencontainers.image.description="BeaconGate relay server (transport-agnostic encrypted tunnel)"
+LABEL org.opencontainers.image.source="https://github.com/trustwall1337/beacongate"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+# Runtime deps: only ca-certificates for outbound TLS, plus the unprivileged
+# user. /etc/beacongate (config bind-mount target) and /var/lib/beacongate
+# (policy store volume target) are pre-created with correct ownership so
+# the unprivileged user can read and write them.
+RUN apk add --no-cache ca-certificates \
+ && adduser -D -H -u 10001 beacongate \
+ && mkdir -p /etc/beacongate /var/lib/beacongate \
+ && chown -R beacongate:beacongate /etc/beacongate /var/lib/beacongate
+
 COPY --from=build /out/beacongate-server /usr/local/bin/beacongate-server
+COPY --from=build /out/beacongate-admin  /usr/local/bin/beacongate-admin
+
 USER beacongate
 EXPOSE 8080
+
+# Default to text logs at info level. Override with `command:` in compose
+# or `docker run … -log-format json -log-level debug`.
 ENTRYPOINT ["/usr/local/bin/beacongate-server"]
-CMD ["-config", "/etc/beacongate/server_config.json"]
+CMD ["-config", "/etc/beacongate/server_config.json", "-log-format", "text", "-log-level", "info"]

@@ -7,9 +7,11 @@ import (
 	"context"
 	"flag"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +23,29 @@ import (
 	serverruntime "github.com/trustwall1337/beacongate/server/runtime"
 	"github.com/trustwall1337/beacongate/server/upstream"
 )
+
+// buildLogger constructs a slog.Logger writing to stderr at the requested
+// level (debug|info|warn|error) in the requested format (text|json).
+// Defaults are info + text; bad values fall back to those.
+func buildLogger(level, format string) *slog.Logger {
+	var lvl slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	opts := &slog.HandlerOptions{Level: lvl}
+	var h slog.Handler = slog.NewTextHandler(os.Stderr, opts)
+	if strings.EqualFold(format, "json") {
+		h = slog.NewJSONHandler(os.Stderr, opts)
+	}
+	return slog.New(h)
+}
 
 // policyEvaluator adapts a policy.Engine to runtime.PolicyEvaluator. Living
 // in the binary keeps the dependency direction clean: server/runtime never
@@ -34,7 +59,12 @@ func (p policyEvaluator) Evaluate(target protocol.Target) serverruntime.PolicyDe
 
 func main() {
 	cfgPath := flag.String("config", "server_config.json", "path to server config JSON")
+	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
+	logFormat := flag.String("log-format", "text", "log format: text|json")
 	flag.Parse()
+
+	logger := buildLogger(*logLevel, *logFormat)
+	slog.SetDefault(logger)
 
 	cfg, err := config.LoadServer(*cfgPath)
 	if err != nil {
@@ -72,6 +102,7 @@ func main() {
 		ExtraBlocked:  cfg.Safety.ExtraBlocked,
 	}
 	srv := serverruntime.New(cfg.ServerID, sealer, dialer, policyEvaluator{engine: engine})
+	srv.SetLogger(logger.With("service", "server", "server_id", cfg.ServerID))
 	if cfg.Limits.MaxSessionsPerClient > 0 {
 		srv.SetMaxSessionsPerClient(cfg.Limits.MaxSessionsPerClient)
 	}
@@ -103,10 +134,12 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+	serverLog := logger.With("service", "server", "server_id", cfg.ServerID)
 	go func() {
-		log.Printf("beacongate-server listening on %s (tunnel=%s, health=%s)", cfg.ListenAddr, tunnelPath, healthPath)
+		serverLog.Info("startup.listening",
+			"addr", cfg.ListenAddr, "tunnel_path", tunnelPath, "health_path", healthPath)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("http: %v", err)
+			serverLog.Error("http.serve_failed", "error", err.Error())
 		}
 	}()
 
@@ -127,9 +160,10 @@ func main() {
 			MaxHeaderBytes:    1 << 20,
 		}
 		go func() {
-			log.Printf("admin API listening on %s (mode=%v)", cfg.Admin.ListenAddr, mode)
+			serverLog.Info("admin_api.listening",
+				"addr", cfg.Admin.ListenAddr, "mode", mode)
 			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("admin: %v", err)
+				serverLog.Error("admin_api.failed", "error", err.Error())
 			}
 		}()
 	}
@@ -137,7 +171,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	<-ctx.Done()
-	log.Printf("shutting down")
+	serverLog.Info("shutting_down")
 	shutCtx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer scancel()
 	httpSrv.Shutdown(shutCtx)

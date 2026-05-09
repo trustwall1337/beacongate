@@ -157,6 +157,8 @@ func (s *Server) handle(conn net.Conn) {
 	target := protocol.Target{Network: "tcp", Host: addr, Port: port}
 	sess, err := s.pump.Dial(target)
 	if err != nil {
+		s.pump.Log().Warn("socks.dial_failed",
+			"target", FormatHostPort(addr, port), "error", err.Error())
 		writeReply(conn, repGeneralFailure)
 		return
 	}
@@ -164,6 +166,10 @@ func (s *Server) handle(conn net.Conn) {
 	if err := writeReply(conn, repSuccess); err != nil {
 		return
 	}
+	s.pump.Log().Info("socks.connect",
+		"session_id", sess.ID(),
+		"target", FormatHostPort(addr, port),
+		"local_app", conn.RemoteAddr().String())
 	bridge(conn, sess)
 }
 

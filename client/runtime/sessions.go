@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -74,6 +76,10 @@ func (p *Pump) SetIdleHold(d time.Duration) {
 	p.mu.Unlock()
 }
 
+// Log returns the logger this pump shares with its Runtime. Convenience
+// for adapters layered on top (e.g. the SOCKS server).
+func (p *Pump) Log() *slog.Logger { return p.rt.Log() }
+
 func (p *Pump) Start() {
 	go p.loop()
 }
@@ -133,6 +139,9 @@ func (p *Pump) Dial(target protocol.Target) (*ClientSession, error) {
 	})
 	p.mu.Unlock()
 	p.signalFlush()
+	p.rt.Log().Info("session.open",
+		"session_id", id,
+		"target", net.JoinHostPort(target.Host, fmt.Sprintf("%d", target.Port)))
 	return s, nil
 }
 
@@ -248,6 +257,8 @@ func (p *Pump) tick() error {
 		if longPoll && errors.Is(err, context.Canceled) {
 			return nil
 		}
+		p.rt.Log().Warn("pump.exchange_failed",
+			"long_poll", longPoll, "error", err.Error())
 		return err
 	}
 	for _, m := range resp {
@@ -325,6 +336,8 @@ func (p *Pump) recvReset(id, code, reason string) {
 	if s == nil {
 		return
 	}
+	p.rt.Log().Warn("session.reset",
+		"session_id", id, "code", code, "reason", reason)
 	s.terminate(fmt.Errorf("session reset: %s %s", code, reason))
 }
 
