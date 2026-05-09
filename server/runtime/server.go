@@ -26,13 +26,13 @@ import (
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 const (
-	defaultDrainWindow          = 25 * time.Millisecond
+	defaultDrainWindow = 25 * time.Millisecond
 	// defaultLongPollWindow is the server-side hold time for an idle
 	// long-poll. Matches client/runtime.defaultIdleHold so the two ends
 	// agree on cadence: 8s gives a fast inbound-channel cycle (low
 	// pickup latency for response data) at the cost of more Apps Script
 	// invocations under idle.
-	defaultLongPollWindow = 8 * time.Second
+	defaultLongPollWindow       = 8 * time.Second
 	defaultMaxChunk             = 16 * 1024
 	defaultMaxSessionsPerClient = 100
 	defaultIdleSessionTimeout   = 10 * time.Minute
@@ -142,9 +142,9 @@ func (s *Server) SetLogger(l *slog.Logger) {
 // log returns the current logger, never nil.
 func (s *Server) log() *slog.Logger { return s.logger.Load() }
 
-// SetLongPollWindow overrides the default 25s server-hold time. Useful for
-// tests that want a tighter bound on test runtime; production should leave
-// the default.
+// SetLongPollWindow overrides the default server-hold time
+// (defaultLongPollWindow). Useful for tests that want a tighter bound
+// on test runtime; production should leave the default.
 func (s *Server) SetLongPollWindow(d time.Duration) {
 	s.mu.Lock()
 	s.longPollWindow = d
