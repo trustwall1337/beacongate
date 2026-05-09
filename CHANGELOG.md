@@ -8,39 +8,40 @@ once it reaches `1.0.0`.
 
 ## [Unreleased] — v1.1.1
 
-### Performance — protocol-level round-trip fusion
+### Performance — server-side response folding (active-drain window)
 
-Two surgical changes reduce the number of Apps Script invocations per
-SOCKS request from 3 to ~1, cutting end-user latency roughly in half.
-Production-realistic in-process bench
+A surgical change cuts end-user latency roughly in half by folding the
+upstream response back into the SAME Apps Script POST that carried the
+request, instead of waiting for a follow-up long-poll. Verified on the
+live VPS against real Apps Script + a real upstream (api.ipify.org):
+**p50 SOCKS GET ~8 s → ~2.4 s (−70 %)** end-to-end. In the
+in-process production-realistic bench
 (`per_call=1.5 s, upstream=200 ms`):
 **p50 SOCKS GET 3.04 s → 1.71 s (−43.7 %)**, Apps Script invocations
 per request **5.00 → 3.90 (−22 %)**. See
 [docs/v1.1.1-latency-benchmark.md](docs/v1.1.1-latency-benchmark.md)
 for the full reproducer and methodology.
 
-- **Client-side OPEN+DATA fusion** — `Pump.Dial` now buffers the
-  OPEN message for 50 ms via `time.AfterFunc(p.signalFlushIfPending)`
-  instead of flushing immediately. The SOCKS layer's first `Write`
-  almost always arrives within the window, so OPEN and the first
-  DATA frame coalesce into a single outbound POST. If no Write
-  arrives within 50 ms (rare), the safety timer ships OPEN alone.
-  `signalFlushIfPending` is a no-op when the outbox is already
-  drained, so a coalesced flush does not waste an extra
-  long-poll-cancel round-trip. This bypasses the
-  `coalesce_step_ms` machinery entirely, so the win arrives without
-  exposing operators to the still-unfixed coalesce production bug.
-
-- **Server-side response folding via `activeDrainWindow`** —
-  `defaultActiveDrainWindow = 5 s` (new). When an inbound batch
+- **`defaultActiveDrainWindow = 5 s`** (new). When an inbound batch
   carries DATA, `handleTunnel` holds the POST open for up to 5 s
   waiting for the upstream's reply, returning as soon as data
   arrives via the per-client signal. The response folds back into
   the same POST that delivered the request, eliminating the
   follow-up long-poll round-trip. OPEN-only or CLOSE-only batches
   keep the short 25 ms `drainWindow` (no upstream response is
-  plausible). `SetActiveDrainWindow(d)` operator override; `d <= 0`
-  reverts to legacy 25 ms behaviour.
+  plausible). `SetActiveDrainWindow(d)` is the operator override;
+  `d <= 0` reverts to legacy 25 ms behaviour.
+
+A client-side OPEN+DATA fusion was prototyped (50 ms Dial-side buffer
+via `time.AfterFunc`) but reverted before release. Real-world testing
+showed the buffer racing with curl's TLS-init time: when ClientHello
+generation took longer than 50 ms, the safety timer shipped OPEN alone,
+the server dialed the upstream, and TLS endpoints (e.g.
+api.ipify.org:443) closed the idle TCP conn at their own timeout
+(~15 s) before DATA ever arrived. The active-drain window above
+delivers the same end-to-end latency win more robustly without
+introducing this Dial-vs-Write race, so the client-side change is left
+out.
 
 ### Operational — multi-connection HTTP/2 pool (Issue A: ~5–10 min wedging)
 

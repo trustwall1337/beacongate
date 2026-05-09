@@ -771,14 +771,22 @@ These are honest current-state limitations of master as of 2026-05-09. None are 
 
 ### Per-request latency floor: ~3–5s (down from ~8–10s pre-v1.1.1)
 
-v1.1.1 ships a protocol-level round-trip fusion that collapses three sequential Apps Script invocations per logical SOCKS request into one. Breakdown today:
+v1.1.1 ships a server-side response-folding window (`activeDrainWindow`,
+default 5 s) that holds the active POST open until the upstream's reply
+arrives, so request and response ride the same Apps Script invocation
+instead of needing a follow-up long-poll. Breakdown today:
 
 ```
-1× POST (OPEN+DATA fused via Dial-side coalesce) → ~1.8s   Apps Script per-call overhead
-   server holds the same POST until upstream replies (~200–800ms typical)
+1× POST (OPEN)              → ~1.8s   Apps Script per-call overhead
+1× POST (DATA + response)   → ~1.8s   server folds upstream reply into this POST
 ─────────────────────────────────
-~2–3s minimum, observed 3–5s in practice
+~3.6s minimum, observed 2–4s on the live VPS (api.ipify.org HTTP)
 ```
+
+The OPEN POST does not consume a full ~1.8 s in series with the DATA
+POST when the destination upstream's TLS server is fast — the upstream
+dial happens during OPEN's processing, so by the time DATA arrives the
+upstream is ready and the response is included in the same POST.
 
 The 22% drop in Apps Script invocations per request is also a real quota win — each request burns one POST instead of three.
 
@@ -795,7 +803,7 @@ The 22% drop in Apps Script invocations per request is also a real quota win —
 
 ### `coalesce_step_ms` is still broken in production
 
-The client config has a knob `coalesce_step_ms` documented as a quota-saving optimization. **Do not enable it.** With any non-zero value, 100% of SOCKS5 curls time out at 25s in production (against real Apps Script). Unit tests in CI pass, but the bug only manifests with the real Apps Script transport. The fusion shipped in v1.1.1 (Dial-side OPEN+DATA buffer) bypasses this machinery entirely, so the latency win arrives without enabling `coalesce_step_ms`. Leave it out of `client_config.json` until the underlying bug is fixed.
+The client config has a knob `coalesce_step_ms` documented as a quota-saving optimization. **Do not enable it.** With any non-zero value, 100% of SOCKS5 curls time out at 25s in production (against real Apps Script). Unit tests in CI pass, but the bug only manifests with the real Apps Script transport. The v1.1.1 latency win is delivered server-side via `activeDrainWindow` and does not require this knob. Leave it out of `client_config.json` until the underlying bug is fixed.
 
 ### Apps Script daily quota
 
