@@ -33,6 +33,8 @@ func main() {
 		serverStatus()
 	case "migrate-config":
 		migrateConfig()
+	case "export-link":
+		exportLink()
 	default:
 		usage()
 	}
@@ -47,7 +49,12 @@ func usage() {
   beacongate-admin status        --addr URL [--token TOKEN]
   beacongate-admin migrate-config --file client_config.json [--dry-run]
                                   Rewrite a pre-v1.1 client config to the
-                                  v1.1 shape (idempotent).`)
+                                  v1.1 shape (idempotent).
+  beacongate-admin export-link    --config client_config.json [--qr] [--qr-png FILE]
+                                  Encode a client config into a bg:// share-link.
+                                  --qr prints a Unicode-block QR code to stdout;
+                                  --qr-png writes a PNG. Treat the link like a
+                                  password — it contains the AES key.`)
 	os.Exit(2)
 }
 

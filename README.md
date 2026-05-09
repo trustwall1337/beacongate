@@ -110,14 +110,32 @@ curl -fsSL https://raw.githubusercontent.com/trustwall1337/beacongate/main/scrip
 
 ### Client side (your laptop or your friend's Android)
 
+**Recommended path — share-link / QR code:**
+
+```sh
+# On the operator's machine, after configuring client_config.json:
+beacongate-admin export-link --config client_config.json --qr
+# prints: bg://config?d=... + a Unicode-block QR
+# also: --qr-png /path/to/qr.png to write a PNG file
+```
+
+The friend pastes the link (or scans the QR with their phone camera):
+
+```sh
+beacongate-client -import "bg://config?d=..." -config client_config.json
+# decodes the link, writes client_config.json (mode 0600), confirms before overwriting
+beacongate-client -config client_config.json -control-addr 127.0.0.1:9091
+```
+
+> ⚠️ The link contains the AES key. Treat it like a password. Send
+> over end-to-end-encrypted channels only (Signal, in person, etc.).
+
+**Manual path — edit JSON directly:**
+
 ```sh
 # Edit client_config.json with the AES key + Deployment ID.
 # (See client_config.appsscript.example.json for the shape.)
-
-# Run the client:
-./bin/beacongate-client -config client_config.json -control-addr 127.0.0.1:9091
-
-# Send traffic through it:
+beacongate-client -config client_config.json -control-addr 127.0.0.1:9091
 curl -x socks5h://127.0.0.1:1080 https://example.com
 ```
 

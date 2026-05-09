@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/trustwall1337/beacongate/client/control"
+	"github.com/trustwall1337/beacongate/client/profiles"
 	clientruntime "github.com/trustwall1337/beacongate/client/runtime"
 	"github.com/trustwall1337/beacongate/client/socks"
 	"github.com/trustwall1337/beacongate/engine/config"
@@ -49,25 +50,56 @@ func buildLogger(level, format string) *slog.Logger {
 }
 
 func main() {
-	cfgPath := flag.String("config", "client_config.json", "path to client config JSON")
+	cfgPath := flag.String("config", "client_config.json", "path to client config JSON (ignored when -profile is set)")
+	profileName := flag.String("profile", "", "load a profile by name from ${XDG_CONFIG_HOME}/beacongate/profiles/<name>.json (mutually exclusive with -config)")
+	listProfiles := flag.Bool("list-profiles", false, "list available profiles in the profiles directory and exit")
 	controlAddr := flag.String("control-addr", "", "local control HTTP listen address (e.g. 127.0.0.1:9091)")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	validateOnly := flag.Bool("validate-only", false, "validate the config and exit without starting the runtime; prints {\"ok\":bool,...} to stdout")
+	importLink := flag.String("import", "", "decode a bg:// share-link and write the resulting config to -config (or to the profile path when -profile is set); overwrite is prompted")
+	importLinkForce := flag.Bool("import-force", false, "with -import, skip the overwrite confirmation prompt")
 	flag.Parse()
 
 	logger := buildLogger(*logLevel, *logFormat)
 	slog.SetDefault(logger)
 
-	if *validateOnly {
-		os.Exit(runValidateOnly(*cfgPath))
+	// --list-profiles prints the profile names and exits.
+	if *listProfiles {
+		os.Exit(runListProfiles())
 	}
 
-	cfg, err := config.LoadClient(*cfgPath)
+	// Resolve effective config path. -profile <name> wins; otherwise -config.
+	effectiveCfgPath := *cfgPath
+	if *profileName != "" {
+		p, err := profiles.Path(*profileName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "profile: %v\n", err)
+			os.Exit(1)
+		}
+		effectiveCfgPath = p
+	}
+
+	if *importLink != "" {
+		// Make sure the profiles dir exists when importing into a profile.
+		if *profileName != "" {
+			_ = profiles.EnsureDir()
+		}
+		os.Exit(runImportLink(*importLink, effectiveCfgPath, *importLinkForce))
+	}
+
+	if *validateOnly {
+		os.Exit(runValidateOnly(effectiveCfgPath))
+	}
+
+	cfg, err := config.LoadClient(effectiveCfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
 	clientLogger := logger.With("service", "client", "client_id", cfg.ClientID)
+	if *profileName != "" {
+		clientLogger = clientLogger.With("profile", *profileName)
+	}
 
 	tr, err := buildTransport(cfg)
 	if err != nil {
@@ -78,7 +110,11 @@ func main() {
 		log.Fatalf("runtime: %v", err)
 	}
 	rt.SetLogger(clientLogger)
-	rt.SetActiveProfile(*cfgPath)
+	if *profileName != "" {
+		rt.SetActiveProfile(*profileName)
+	} else {
+		rt.SetActiveProfile(effectiveCfgPath)
+	}
 	defer func() { _ = rt.Close() }()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -231,6 +267,27 @@ func hasOnlyEmptyStrings(s []string) bool {
 		}
 	}
 	return true
+}
+
+// runListProfiles prints one profile name per line on stdout
+// (alphabetical) and returns the exit code. Lists files in the
+// profiles directory; returns an empty list (and exit 0) when the
+// directory doesn't exist yet.
+func runListProfiles() int {
+	names, err := profiles.List()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list-profiles: %v\n", err)
+		return 1
+	}
+	for _, n := range names {
+		fmt.Println(n)
+	}
+	if len(names) == 0 {
+		dir, _ := profiles.Dir()
+		fmt.Fprintf(os.Stderr, "(no profiles in %s)\n", dir)
+		fmt.Fprintln(os.Stderr, "Create one with: beacongate-client -profile <name> -import \"bg://...\"")
+	}
+	return 0
 }
 
 // runValidateOnly loads and validates the config at cfgPath, prints a
