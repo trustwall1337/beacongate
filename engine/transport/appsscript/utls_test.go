@@ -2,12 +2,24 @@ package appsscript
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"math/big"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
+	"golang.org/x/net/http2"
 )
 
 // TestUTLSFingerprintIsChromeNotGo verifies that the ClientHello uTLS
@@ -208,20 +220,143 @@ func TestUTLSCacheRegistry(t *testing.T) {
 	}
 }
 
-// TestUTLSConnWrapperConnectionState verifies the bridge from
-// utls.ConnectionState to tls.ConnectionState — without this, http.Transport
-// can't see the negotiated ALPN and falls back to HTTP/1.1 even when
-// h2 was negotiated.
+// TestUTLSConnWrapperConnectionState verifies the wrapper exposes
+// stdlib tls.ConnectionState. http2.Transport doesn't strictly
+// require this method (h2 dispatch is driven by the dialer's ALPN
+// check, not by type-assertion in the transport), but consumers and
+// tests benefit from having stdlib-shaped state available.
 func TestUTLSConnWrapperConnectionState(t *testing.T) {
-	// We can't easily mock *utls.UConn directly, so this test just
-	// asserts the wrapper compiles and the field shape matches what
-	// http.Transport's TLS-detection assertion expects.
 	var w *utlsConnWrapper // typed nil; compile-time check only
 	if w != nil {
 		_ = w.ConnectionState() // tls.ConnectionState — compile error if return type drifts
 	}
-	// The runtime proof of the wrapper working is the existing
-	// appsscript acceptance tests passing — they exercise the full
-	// dial-handshake-roundtrip path through this wrapper.
-	_ = strings.Contains // touch import to avoid "imported and not used" if test compiles minimally
+	_ = strings.Contains
+}
+
+// TestEndToEndH2RoundtripThroughUTLS is the regression test for the
+// Go 1.21+ `*tls.Conn` assertion bug fixed in this commit.
+//
+// Before the fix, fronting.go used net/http.Transport with a
+// DialTLSContext that returned a *utlsConnWrapper. Go's net/http
+// transport.go:1763 does a concrete `pconn.conn.(*tls.Conn)`
+// assertion since 1.21; that assertion fails on our wrapper, so
+// `pconn.tlsState` stays nil, the HTTP/2 dispatch path is silently
+// skipped, and Go tries to parse the HTTP/2 SETTINGS frame as
+// HTTP/1.1 — chokes immediately on the binary preamble.
+//
+// This test stands up a TLS server speaking HTTP/2, dials it
+// through `newFrontedClient`'s production code path (uTLS handshake +
+// http2.Transport), issues a real GET, and asserts a 200 with the
+// expected body. If anyone re-introduces the http.Transport+wrapper
+// architecture, this test fails immediately.
+func TestEndToEndH2RoundtripThroughUTLS(t *testing.T) {
+	// Self-signed cert with SAN matching the SNI we'll present.
+	cert, err := generateSelfSignedCert("test.example")
+	if err != nil {
+		t.Fatalf("cert: %v", err)
+	}
+
+	srv := &http.Server{
+		// nil handler returns 200 OK with empty body for "/" — close
+		// enough for an end-to-end h2 verification.
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "h2-roundtrip-ok")
+		}),
+	}
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+		NextProtos:   []string{"h2"},
+	}
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	go func() { _ = srv.Serve(listener) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	addr := listener.Addr().String()
+
+	// Build a one-shot http.Client using our production newFrontedClient
+	// path, but pointed at the local TLS listener. We override the
+	// uTLS InsecureSkipVerify via a dialer that mirrors dialUTLS but
+	// skips cert verification (the test cert is self-signed).
+	cache := newUTLSSessionCache()
+	transport := &http2.Transport{
+		DialTLSContext: func(ctx context.Context, _ string, _ string, _ *tls.Config) (net.Conn, error) {
+			rawConn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+			ucfg := &utls.Config{
+				ServerName:         "test.example",
+				MinVersion:         tls.VersionTLS13,
+				InsecureSkipVerify: true, // self-signed test cert
+				ClientSessionCache: cache,
+				NextProtos:         []string{"h2", "http/1.1"},
+			}
+			uconn := utls.UClient(rawConn, ucfg, pinnedProfile)
+			if err := uconn.HandshakeContext(ctx); err != nil {
+				_ = rawConn.Close()
+				return nil, err
+			}
+			alpn := uconn.ConnectionState().NegotiatedProtocol
+			if alpn != "h2" {
+				_ = uconn.Close()
+				return nil, fmt.Errorf("ALPN %q is not h2", alpn)
+			}
+			return &utlsConnWrapper{UConn: uconn}, nil
+		},
+		ReadIdleTimeout: 5 * time.Second,
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	resp, err := client.Get("https://test.example/")
+	if err != nil {
+		t.Fatalf("h2 GET: %v (this is the regression — bug if request gets parsed as h1)", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d, want 200", resp.StatusCode)
+	}
+	if got := resp.ProtoMajor; got != 2 {
+		t.Errorf("proto major: got %d, want 2 (HTTP/2). If this is 1, the http.Transport bug is back.", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if got := string(body); got != "h2-roundtrip-ok" {
+		t.Errorf("body: got %q, want %q", got, "h2-roundtrip-ok")
+	}
+}
+
+// generateSelfSignedCert creates a fresh self-signed TLS certificate
+// for the given SAN. Used by the h2 round-trip test.
+func generateSelfSignedCert(san string) (tls.Certificate, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: san},
+		DNSNames:     []string{san},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  priv,
+	}, nil
 }

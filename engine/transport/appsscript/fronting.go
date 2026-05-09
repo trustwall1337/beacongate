@@ -2,11 +2,14 @@ package appsscript
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
 
+	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
 )
 
@@ -21,12 +24,14 @@ import (
 // (e.g. www.google.com) does not resume against a different front (e.g.
 // mail.google.com).
 //
-// **uTLS:** as of v1.1.0 the TLS handshake is performed by
-// github.com/refraction-networking/utls presenting a pinned Chrome
-// ClientHello fingerprint (see utls_dial.go). This is the
-// censorship-evasion property — without uTLS, the handshake
-// fingerprints as "Go" and is detectable on the wire even though the
-// destination is a real Google IP.
+// **Transport routing (v1.1.0):** Apps Script via Google's edge always
+// negotiates HTTP/2. We therefore drive requests through
+// `http2.Transport` directly — bypassing `net/http.Transport` and its
+// concrete `*tls.Conn` type assertion that's incompatible with uTLS's
+// `*utls.UConn` since Go 1.21. The uTLS handshake advertises both "h2"
+// and "http/1.1" in ALPN (Chrome-realistic) and verifies "h2" was
+// selected; if Google ever falls back to HTTP/1.1 we error rather than
+// silently degrade through an incompatible code path.
 type FrontingConfig struct {
 	// GoogleIP is the TCP-layer destination, in "ip:port" form. When
 	// empty, the dialer falls back to system DNS for the URL's host —
@@ -86,11 +91,22 @@ func (p *httpClientPool) pick() *http.Client {
 	return p.clients[idx]
 }
 
-// newFrontedClient builds a single *http.Client that dials googleIP and
-// presents sniHost in the TLS ClientHello. The HTTP Host header on each
-// request is left to Go's stdlib (= URL.Host), which for an Apps Script
-// URL is `script.google.com` — exactly the target we want Google's edge
+// newFrontedClient builds a single *http.Client whose underlying
+// transport is `http2.Transport`, using a custom DialTLSContext that
+// performs the uTLS handshake. The HTTP Host header on each request is
+// left to Go's stdlib (= URL.Host), which for an Apps Script URL is
+// `script.google.com` — exactly the target we want Google's edge
 // routing to receive.
+//
+// **Why http2.Transport and not http.Transport:** Go's net/http
+// transport detects HTTP/2 via a concrete `pconn.conn.(*tls.Conn)`
+// type assertion (transport.go:1763 in Go 1.21+). Our uTLS conn is
+// a `*utls.UConn`, not a `*tls.Conn`, so the assertion fails,
+// `pconn.tlsState` stays nil, and the HTTP/2 dispatch path is
+// silently skipped — leaving Go to parse Google's HTTP/2 SETTINGS
+// frame as if it were HTTP/1.1. http2.Transport.DialTLSContext
+// avoids this problem entirely: it only knows it got a net.Conn
+// after a successful TLS handshake, then drives h2 directly.
 //
 // **TLS layer:** uTLS does the handshake (pinned Chrome 131 fingerprint,
 // see utls_dial.go), so a wire observer sees what looks like a real
@@ -99,42 +115,42 @@ func (p *httpClientPool) pick() *http.Client {
 // to TLS 1.2.
 //
 // ALPN advertises ["h2", "http/1.1"] in the ClientHello — same as real
-// Chrome. After handshake, Go's http.Transport detects the negotiated
-// protocol via our utlsConnWrapper.ConnectionState() and routes through
-// http2.Transport (h2) or net/http's HTTP/1.1 path accordingly.
+// Chrome. After handshake, the dialer asserts "h2" was selected;
+// if not (which should be impossible against modern Google fronts),
+// it errors rather than handing a partially-negotiated conn to http2.
 func newFrontedClient(googleIP, sniHost string, requestTimeout time.Duration, sessionCache uTLSSessionCache) *http.Client {
-	transport := &http.Transport{
-		// DialTLSContext is the integration point for uTLS: when set,
-		// http.Transport calls this for HTTPS connections instead of
-		// doing its own TLS handshake. We hand back a wrapper conn that
-		// exposes tls.ConnectionState so http.Transport's HTTP/2
-		// detection still works.
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialUTLS(ctx, googleIP, sniHost, sessionCache, []string{"h2", "http/1.1"})
+	transport := &http2.Transport{
+		// http2 calls this for every new connection. We ignore the
+		// `network` and `addr` it passes (those derive from the URL)
+		// and use our SNI-fronted googleIP instead. The `_ *tls.Config`
+		// is also ignored — uTLS uses its own utls.Config built in
+		// dialUTLS.
+		DialTLSContext: func(ctx context.Context, _ string, _ string, _ *tls.Config) (net.Conn, error) {
+			conn, err := dialUTLS(ctx, googleIP, sniHost, sessionCache, []string{"h2", "http/1.1"})
+			if err != nil {
+				return nil, err
+			}
+			// Verify h2 was negotiated. If Google somehow returns
+			// http/1.1, we've configured ALPN to allow it but we
+			// don't have an HTTP/1.1 path — error rather than
+			// hand a non-h2 conn to http2.Transport.
+			alpn := conn.UConn.ConnectionState().NegotiatedProtocol
+			if alpn != "h2" {
+				_ = conn.Close()
+				return nil, fmt.Errorf("appsscript: ALPN %q is not \"h2\"; http2.Transport requires h2", alpn)
+			}
+			return conn, nil
 		},
-		// TLSClientConfig is unused once DialTLSContext is set, but
-		// leave it nil rather than constructing an unused Config —
-		// avoids confusion about which TLS path is active.
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          16,
-		MaxIdleConnsPerHost:   8,
-		WriteBufferSize:       64 * 1024,
-		ReadBufferSize:        64 * 1024,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-
-	// HTTP/2 idle ping detection: a black-holed h2 connection otherwise
-	// lingers until the kernel TCP keepalive fires (~2 hours by default),
-	// stalling in-flight requests. 30s ping timeout matches Goose's tuning.
-	if h2t, err := http2.ConfigureTransports(transport); err == nil && h2t != nil {
-		h2t.ReadIdleTimeout = 30 * time.Second
-		h2t.PingTimeout = 15 * time.Second
+		// Idle ping: a black-holed h2 connection would otherwise linger
+		// until the kernel TCP keepalive fires (~2 hours by default),
+		// stalling in-flight requests. 30s ping timeout matches Goose's
+		// tuning.
+		ReadIdleTimeout: 30 * time.Second,
+		PingTimeout:     15 * time.Second,
 		// Raise the max DATA frame size from the spec default 16 KiB to
-		// 1 MiB — base64-expanded batches can be ~10 MiB and the framing
-		// overhead with default size is significant.
-		h2t.MaxReadFrameSize = 1 << 20
+		// 1 MiB — base64-expanded batches can be ~10 MiB and the
+		// framing overhead with default size is significant.
+		MaxReadFrameSize: 1 << 20,
 	}
 
 	return &http.Client{Transport: transport, Timeout: requestTimeout}
@@ -176,4 +192,17 @@ func prewarmFrontedClients(googleIP string, sniHosts []string, caches *utlsCache
 			_, _ = conn.Read(buf[:])
 		}(sni)
 	}
+}
+
+// Compile-time assertion: uTLS UConn satisfies utls.UConn-implementing
+// the net.Conn methods we need (the http2 transport only requires
+// net.Conn; nothing extra).
+var _ utlsConnReturn = (*utls.UConn)(nil)
+
+// utlsConnReturn documents the conn shape dialUTLS hands to
+// http2.Transport. We deliberately do NOT require ConnectionState()
+// here — http2.Transport doesn't need it for h2 dispatch (h2 is
+// detected by the dialer, not by the transport via type assertion).
+type utlsConnReturn interface {
+	net.Conn
 }

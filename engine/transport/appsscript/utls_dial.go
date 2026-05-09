@@ -58,16 +58,19 @@ func buildUTLSConfig(sniHost string, sessionCache uTLSSessionCache, alpnProtocol
 
 // dialUTLS opens a TCP connection to googleIP (or sniHost:443 if
 // googleIP is empty), wraps it with uTLS using the pinned Chrome
-// fingerprint, completes the handshake, and returns a net.Conn that
-// http.Transport can detect as a TLS conn (so HTTP/2 ALPN routing
-// still works).
+// fingerprint, completes the handshake, and returns a *utlsConnWrapper.
+//
+// The return type is the wrapper (not bare net.Conn) so callers can
+// reach `.UConn.ConnectionState().NegotiatedProtocol` after the
+// handshake — http2.Transport's DialTLSContext callback does this to
+// verify h2 ALPN was selected before handing the conn off.
 //
 // sessionCache is required and must be persistent across calls so
 // resumption works on subsequent connections to the same SNI host.
 //
 // alpnProtocols controls the ALPN list advertised in the ClientHello.
 // For HTTP traffic, pass {"h2", "http/1.1"}.
-func dialUTLS(ctx context.Context, googleIP, sniHost string, sessionCache uTLSSessionCache, alpnProtocols []string) (net.Conn, error) {
+func dialUTLS(ctx context.Context, googleIP, sniHost string, sessionCache uTLSSessionCache, alpnProtocols []string) (*utlsConnWrapper, error) {
 	addr := googleIP
 	if addr == "" {
 		addr = net.JoinHostPort(sniHost, "443")
@@ -89,21 +92,25 @@ func dialUTLS(ctx context.Context, googleIP, sniHost string, sessionCache uTLSSe
 	return &utlsConnWrapper{UConn: uConn}, nil
 }
 
-// utlsConnWrapper bridges *utls.UConn to net/http's TLS detection.
+// utlsConnWrapper wraps *utls.UConn and exposes a stdlib-shaped
+// `ConnectionState() tls.ConnectionState` for any caller that wants
+// it. http2.Transport doesn't actually need this method (we drive h2
+// dispatch from the dialer's ALPN check rather than via type-assertion
+// in the transport), but we keep the wrapper because:
 //
-// Go's http.Transport detects "this conn is a TLS conn that negotiated
-// ALPN h2" by type-asserting the connection to:
+//  1. It documents the close mapping between uTLS and stdlib state for
+//     anyone reading this code.
+//  2. Tests can call `.UConn.ConnectionState().NegotiatedProtocol`
+//     without re-implementing the field-by-field copy.
 //
-//	interface { ConnectionState() tls.ConnectionState }
-//
-// where tls is *crypto/tls* (stdlib). uTLS's UConn has a
-// ConnectionState method too, but it returns *utls.ConnectionState*
-// (uTLS's own type), which does NOT satisfy that implicit interface.
-//
-// Without this wrapper, http.Transport sees the conn as plain TCP
-// (no TLS state), refuses to use HTTP/2, and falls back to HTTP/1.1.
-// With this wrapper, http.Transport sees a real tls.ConnectionState,
-// reads NegotiatedProtocol="h2", and routes through http2.Transport.
+// **Historical note:** in earlier versions of Go (≤ 1.20) net/http
+// detected HTTP/2 via an `interface { ConnectionState() tls.ConnectionState }`
+// type assertion, and this wrapper made our conn satisfy it. Go 1.21+
+// replaced that with a concrete `*tls.Conn` assertion (transport.go:1763)
+// which our wrapper cannot satisfy without inheriting from `*tls.Conn`
+// (which uTLS forks from). The fix in v1.1.0 is to bypass net/http's
+// transport entirely and use http2.Transport directly — see
+// fronting.go's `newFrontedClient`.
 type utlsConnWrapper struct {
 	*utls.UConn
 }
