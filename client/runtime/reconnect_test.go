@@ -107,8 +107,14 @@ func TestPumpLongPollDeadlineNotCountedAsFailure(t *testing.T) {
 	// Drive enough ticks to exceed BOTH the degraded threshold (3) and
 	// the reconnecting threshold (5). All should be silent no-ops.
 	for i := 0; i < reconnectingAfterFails+2; i++ {
-		if err := p.tick(); err != nil {
-			t.Fatalf("tick #%d: returned %v; long-poll deadline should be a non-error completion", i+1, err)
+		didWork, err := p.tick()
+		if err != nil {
+			t.Fatalf("tick #%d: returned err=%v; long-poll deadline should be a non-error completion", i+1, err)
+		}
+		// A long-poll completing on its own deadline counts as didWork
+		// (success branch), not a failure.
+		if !didWork {
+			t.Fatalf("tick #%d: didWork=false unexpectedly (idle slot exhausted? sessions empty?)", i+1)
 		}
 	}
 

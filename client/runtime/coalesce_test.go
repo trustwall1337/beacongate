@@ -6,17 +6,23 @@ import (
 	"time"
 )
 
+// flushFired returns a channel that closes the next time the pump's
+// wake broadcaster fires. Capture this BEFORE calling scheduleFlush()
+// so a Broadcast() between the call and the wait cannot be missed.
+func flushFired(p *Pump) <-chan struct{} { return p.wake.C() }
+
 // TestCoalesceWindowZeroFiresImmediately confirms coalesce_step_ms=0
 // preserves the prior behavior — every signalFlush goes through
 // without delay.
 func TestCoalesceWindowZeroFiresImmediately(t *testing.T) {
-	p := &Pump{flush: make(chan struct{}, 1)}
+	p := &Pump{wake: newWaker()}
 	// Default coalesceWindow is zero.
+	ch := flushFired(p)
 	start := time.Now()
 	p.scheduleFlush()
-	// flush channel should be filled immediately.
+	// wake should be Broadcasted immediately, closing ch.
 	select {
-	case <-p.flush:
+	case <-ch:
 		// good
 	case <-time.After(50 * time.Millisecond):
 		t.Fatal("scheduleFlush with window=0 didn't fire immediately")
@@ -29,14 +35,15 @@ func TestCoalesceWindowZeroFiresImmediately(t *testing.T) {
 // TestCoalesceWindowDelaysFlush confirms a non-zero window defers the
 // flush by approximately that window.
 func TestCoalesceWindowDelaysFlush(t *testing.T) {
-	p := &Pump{flush: make(chan struct{}, 1)}
+	p := &Pump{wake: newWaker()}
 	p.SetCoalesceWindow(40 * time.Millisecond)
 
+	ch := flushFired(p)
 	start := time.Now()
 	p.scheduleFlush()
 
 	select {
-	case <-p.flush:
+	case <-ch:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("scheduleFlush with window=40ms never fired")
 	}
@@ -55,8 +62,13 @@ func TestCoalesceWindowDelaysFlush(t *testing.T) {
 // In the real system this means 1 HTTP POST instead of 5 — the entire
 // reason for `coalesce_step_ms`.
 func TestCoalesceMultipleEnqueuesProduceOneFlush(t *testing.T) {
-	p := &Pump{flush: make(chan struct{}, 4)} // capacity 4 so we can detect spurious extra flushes
+	p := &Pump{wake: newWaker()}
 	p.SetCoalesceWindow(50 * time.Millisecond)
+
+	// Capture the wake channel BEFORE the burst so we observe whether
+	// a flush fires during it. A burst with the timer constantly
+	// resetting should NOT fire any wake.
+	ch := flushFired(p)
 
 	// Fire 5 schedules, 5ms apart — each should reset the timer.
 	for i := 0; i < 5; i++ {
@@ -66,23 +78,25 @@ func TestCoalesceMultipleEnqueuesProduceOneFlush(t *testing.T) {
 
 	// The flush should NOT have fired yet (timer keeps resetting).
 	select {
-	case <-p.flush:
+	case <-ch:
 		t.Fatal("flush fired during the coalesce burst — timer not resetting")
-	case <-time.After(0):
+	default:
 		// good
 	}
 
 	// Now wait for the window to elapse without resetting.
 	select {
-	case <-p.flush:
-		// good
+	case <-ch:
+		// good — Broadcast fired exactly once
 	case <-time.After(150 * time.Millisecond):
 		t.Fatal("flush never fired after the coalesce burst")
 	}
 
-	// Drain — there should be no second flush.
+	// After Broadcast, ch is closed. wake.C() returns the next-period
+	// channel, which should not fire (no more enqueues).
+	ch2 := flushFired(p)
 	select {
-	case <-p.flush:
+	case <-ch2:
 		t.Fatal("got a second flush — coalescing should produce exactly one")
 	case <-time.After(50 * time.Millisecond):
 		// good
@@ -93,9 +107,11 @@ func TestCoalesceMultipleEnqueuesProduceOneFlush(t *testing.T) {
 // faster than the window can't defer the flush forever — the safety
 // cap (5×window) forces a flush.
 func TestCoalesceSafetyCap(t *testing.T) {
-	p := &Pump{flush: make(chan struct{}, 1)}
+	p := &Pump{wake: newWaker()}
 	window := 30 * time.Millisecond
 	p.SetCoalesceWindow(window)
+
+	ch := flushFired(p)
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -117,7 +133,7 @@ func TestCoalesceSafetyCap(t *testing.T) {
 
 	start := time.Now()
 	select {
-	case <-p.flush:
+	case <-ch:
 		// safety cap should fire within ~5×window = 150ms
 		elapsed := time.Since(start)
 		// Allow generous jitter for slow CI; the point is "doesn't run
