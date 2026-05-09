@@ -67,8 +67,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v8
         with:
+          # Pinned to v2.x — the .golangci.yml at repo root is a v2
+          # config (`version: "2"`). The previous `@v6` action with
+          # `version: latest` resolved to v1.64.8 (built with Go
+          # 1.24), which (a) cannot read v2 configs and (b) refuses
+          # to lint code that targets `go 1.25`.
           version: latest
           args: --timeout=5m
 
