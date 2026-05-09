@@ -2,7 +2,6 @@ package appsscript
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -21,6 +20,13 @@ import (
 // session caches, since a TLS resumption ticket from one Google front
 // (e.g. www.google.com) does not resume against a different front (e.g.
 // mail.google.com).
+//
+// **uTLS:** as of v1.1.0 the TLS handshake is performed by
+// github.com/refraction-networking/utls presenting a pinned Chrome
+// ClientHello fingerprint (see utls_dial.go). This is the
+// censorship-evasion property — without uTLS, the handshake
+// fingerprints as "Go" and is detectable on the wire even though the
+// destination is a real Google IP.
 type FrontingConfig struct {
 	// GoogleIP is the TCP-layer destination, in "ip:port" form. When
 	// empty, the dialer falls back to system DNS for the URL's host —
@@ -32,12 +38,12 @@ type FrontingConfig struct {
 }
 
 // httpClientPool holds one *http.Client per configured SNI host, plus
-// round-robin selection state. Each client uses its own TLS session
+// round-robin selection state. Each client uses its own uTLS session
 // cache (resumption is bound to SNI server-side).
 type httpClientPool struct {
 	clients []*http.Client
 	hosts   []string
-	caches  map[string]tls.ClientSessionCache
+	caches  *utlsCacheRegistry
 	next    atomic.Uint64
 }
 
@@ -52,15 +58,10 @@ func newHTTPClientPool(cfg FrontingConfig, requestTimeout time.Duration) *httpCl
 	if len(hosts) == 0 {
 		hosts = []string{"www.google.com"}
 	}
-	caches := make(map[string]tls.ClientSessionCache, len(hosts))
-	for _, sni := range hosts {
-		if _, ok := caches[sni]; !ok {
-			caches[sni] = tls.NewLRUClientSessionCache(8)
-		}
-	}
+	caches := newUTLSCacheRegistry()
 	clients := make([]*http.Client, len(hosts))
 	for i, sni := range hosts {
-		clients[i] = newFrontedClient(cfg.GoogleIP, sni, requestTimeout, caches[sni])
+		clients[i] = newFrontedClient(cfg.GoogleIP, sni, requestTimeout, caches.get(sni))
 	}
 	pool := &httpClientPool{
 		clients: clients,
@@ -91,33 +92,29 @@ func (p *httpClientPool) pick() *http.Client {
 // URL is `script.google.com` — exactly the target we want Google's edge
 // routing to receive.
 //
-// TLS 1.3 minimum (downgrade attempts MUST fail rather than fall back
-// to TLS 1.2 which would let an attacker strip cipher protections).
-// Session ticket cache enables resumption; ALPN pinned to ["h2",
-// "http/1.1"] so the resumption ticket — bound to ALPN — is reusable.
-func newFrontedClient(googleIP, sniHost string, requestTimeout time.Duration, sessionCache tls.ClientSessionCache) *http.Client {
-	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-
+// **TLS layer:** uTLS does the handshake (pinned Chrome 131 fingerprint,
+// see utls_dial.go), so a wire observer sees what looks like a real
+// Chrome browser talking to Google. TLS 1.3 minimum is enforced inside
+// the uTLS Config; downgrade attempts MUST fail rather than fall back
+// to TLS 1.2.
+//
+// ALPN advertises ["h2", "http/1.1"] in the ClientHello — same as real
+// Chrome. After handshake, Go's http.Transport detects the negotiated
+// protocol via our utlsConnWrapper.ConnectionState() and routes through
+// http2.Transport (h2) or net/http's HTTP/1.1 path accordingly.
+func newFrontedClient(googleIP, sniHost string, requestTimeout time.Duration, sessionCache uTLSSessionCache) *http.Client {
 	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if googleIP != "" {
-				// Dial the configured Google IP regardless of what the
-				// HTTP layer thinks the address should be. This is the
-				// SNI-fronting trick: TCP destination locked to Google,
-				// HTTP target is whatever the URL says.
-				return dialer.DialContext(ctx, "tcp", googleIP)
-			}
-			return dialer.DialContext(ctx, network, addr)
+		// DialTLSContext is the integration point for uTLS: when set,
+		// http.Transport calls this for HTTPS connections instead of
+		// doing its own TLS handshake. We hand back a wrapper conn that
+		// exposes tls.ConnectionState so http.Transport's HTTP/2
+		// detection still works.
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialUTLS(ctx, googleIP, sniHost, sessionCache, []string{"h2", "http/1.1"})
 		},
-		TLSClientConfig: &tls.Config{
-			ServerName:         sniHost,
-			MinVersion:         tls.VersionTLS13,
-			ClientSessionCache: sessionCache,
-			NextProtos:         []string{"h2", "http/1.1"},
-		},
+		// TLSClientConfig is unused once DialTLSContext is set, but
+		// leave it nil rather than constructing an unused Config —
+		// avoids confusion about which TLS path is active.
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          16,
 		MaxIdleConnsPerHost:   8,
@@ -146,45 +143,37 @@ func newFrontedClient(googleIP, sniHost string, requestTimeout time.Duration, se
 // prewarmFrontedClients fires one TLS dial per SNI host in the
 // background to populate each SNI's session ticket cache.
 //
-// Critical detail: in TLS 1.3 the server sends NewSessionTicket *after*
-// the handshake completes, on the data channel. Closing immediately
-// after HandshakeContext drops the ticket on the floor. To capture the
-// ticket we issue a tiny read with a short deadline; the read errors
-// out on deadline but by then crypto/tls has consumed the
-// post-handshake message and stored the ticket in the cache. (Direct
-// port of GooseRelayVPN's mechanism.)
-func prewarmFrontedClients(googleIP string, sniHosts []string, caches map[string]tls.ClientSessionCache) {
+// **uTLS:** the prewarm uses the same dialUTLS path the real requests
+// use — same fingerprint, same ALPN, same session cache. If we used
+// stdlib crypto/tls here, the cached ticket might not resume cleanly
+// against the uTLS handshake on the next real request (different code
+// paths can yield ticket binding mismatches even when the wire format
+// agrees).
+//
+// Critical detail (carried over from the stdlib version): in TLS 1.3 the
+// server sends NewSessionTicket *after* the handshake completes, on the
+// data channel. Closing immediately after HandshakeContext drops the
+// ticket on the floor. To capture the ticket we issue a tiny read with
+// a short deadline; the read errors out on deadline but by then the
+// post-handshake message has been consumed and the ticket stored in the
+// cache.
+func prewarmFrontedClients(googleIP string, sniHosts []string, caches *utlsCacheRegistry) {
 	const (
-		dialTimeout   = 3 * time.Second
 		ticketWindow  = 500 * time.Millisecond
 		overallBudget = 5 * time.Second
 	)
-	dialer := &net.Dialer{Timeout: dialTimeout}
 	for _, sni := range sniHosts {
-		go func(sniHost string, cache tls.ClientSessionCache) {
+		go func(sniHost string) {
 			ctx, cancel := context.WithTimeout(context.Background(), overallBudget)
 			defer cancel()
-			addr := googleIP
-			if addr == "" {
-				addr = net.JoinHostPort(sniHost, "443")
-			}
-			rawConn, err := dialer.DialContext(ctx, "tcp", addr)
+			conn, err := dialUTLS(ctx, googleIP, sniHost, caches.get(sniHost), []string{"h2", "http/1.1"})
 			if err != nil {
 				return
 			}
-			defer func() { _ = rawConn.Close() }()
-			tlsConn := tls.Client(rawConn, &tls.Config{
-				ServerName:         sniHost,
-				MinVersion:         tls.VersionTLS13,
-				ClientSessionCache: cache,
-				NextProtos:         []string{"h2", "http/1.1"},
-			})
-			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				return
-			}
-			_ = tlsConn.SetReadDeadline(time.Now().Add(ticketWindow))
+			defer func() { _ = conn.Close() }()
+			_ = conn.SetReadDeadline(time.Now().Add(ticketWindow))
 			var buf [1]byte
-			_, _ = tlsConn.Read(buf[:])
-		}(sni, caches[sni])
+			_, _ = conn.Read(buf[:])
+		}(sni)
 	}
 }

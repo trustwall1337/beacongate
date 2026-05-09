@@ -37,6 +37,56 @@ matching section below.
 
 ## Symptom → first response
 
+### `cosign verify-blob` fails on a downloaded release
+
+The signature on the release artifact didn't validate against the
+BeaconGate workflow's GitHub OIDC identity. **Stop — do not extract
+or run the binary.**
+
+Possible causes (in decreasing likelihood):
+
+- **Wrong files paired.** You're verifying `vX.Y.Z-checksums.txt` with
+  a `.sig` and `.cert` from a *different* release. Re-download all
+  three from the same Release page and retry.
+- **Network corruption.** A partial or corrupted download. Re-run
+  the download.
+- **Repo identity changed.** The plan committed to keeping the
+  release workflow at `https://github.com/trustwall1337/beacongate/.github/workflows/release.yml`.
+  If the repo has moved/renamed, the `--certificate-identity-regexp`
+  in your verify command is no longer correct. Check the latest
+  Release notes for the current verify command before lowering your
+  guard.
+- **Genuine tampering.** Rare but possible (compromised GitHub
+  account, malicious mirror, etc.). Open an issue on the repo
+  flagging the fingerprint mismatch; do not run the artifact.
+
+The [`scripts/install.sh`](../scripts/install.sh) one-liner runs the
+same verification before unpacking. If it aborts at the verification
+step, the same triage applies.
+
+### Build fails with "JA3 mismatch" or `TestUTLSFingerprintIsChromeNotGo` test failure
+
+The uTLS fingerprint test asserts the ClientHello structure matches
+Chrome 131. Failures usually mean one of:
+
+- **uTLS library bumped without bumping the pin.** Someone ran
+  `go get -u github.com/refraction-networking/utls` and the new
+  library doesn't include `HelloChrome_131` (very unlikely — uTLS
+  is additive) or has changed its emission for an existing profile
+  (also rare). Check
+  [`docs/uTLS-fingerprint-cadence.md`](uTLS-fingerprint-cadence.md)
+  for the current pin and the bump procedure.
+- **Pinned profile bumped without updating expected invariants.**
+  The test asserts certain extensions (`application_settings`,
+  `compress_certificate`) are present. If a new Chrome version
+  drops one of these, the test should be updated as part of the
+  pin bump.
+- **Stdlib `tls` accidentally re-introduced.** A merge conflict or
+  refactor reverted `engine/transport/appsscript/fronting.go` to
+  use stdlib `crypto/tls`. The test catches this — that's why it
+  exists. Re-read [`engine/transport/appsscript/utls_dial.go`](../engine/transport/appsscript/utls_dial.go)
+  and confirm `dialUTLS` is still the active path.
+
 ### `auth failed` (HTTP 401) on `/tunnel`
 
 The server's AEAD key and the client's AEAD key don't match.

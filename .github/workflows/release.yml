@@ -1,0 +1,263 @@
+name: Release
+
+# Tag-driven release pipeline. Push a tag matching `v*` to trigger.
+#
+#   git tag v1.1.0
+#   git push origin v1.1.0
+#
+# Produces:
+#   - 6 archives (linux amd64/arm64, darwin amd64/arm64, windows amd64, android arm64)
+#   - SHA-256 checksums file
+#   - cosign signature + identity certificate over the checksums file
+#   - GHCR image at ghcr.io/<owner>/beacongate-server:<tag> and :latest
+#   - cosign signature on the GHCR image
+#
+# All signing uses GitHub OIDC + sigstore — no operator key management.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write     # create the GitHub Release + upload assets
+  packages: write     # push GHCR image
+  id-token: write     # cosign keyless signing via GitHub OIDC
+
+jobs:
+  build:
+    name: build / ${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: ''
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            suffix: ''
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            suffix: ''
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            suffix: ''
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            suffix: ''
+            archive: zip
+          # Android (Termux): a linux/arm64 binary suffixed -android-arm64
+          # so it lands under a distinct asset name despite the same GOOS.
+          - goos: linux
+            goarch: arm64
+            suffix: '-android'
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # for changelog extraction
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set asset name
+        id: name
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          if [ "${{ matrix.suffix }}" = "-android" ]; then
+            arch_label="android-arm64"
+          else
+            arch_label="${{ matrix.goos }}-${{ matrix.goarch }}"
+          fi
+          base="BeaconGate-${tag}-${arch_label}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "base=${base}" >> "$GITHUB_OUTPUT"
+          echo "archive=${base}.${{ matrix.archive }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist/staging
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          for cmd in beacongate-client beacongate-server beacongate-admin; do
+            go build -trimpath -ldflags="-s -w" \
+              -o "dist/staging/${cmd}${ext}" "./cmd/${cmd}"
+          done
+          cp client_config.example.json dist/staging/
+          cp client_config.appsscript.example.json dist/staging/
+          cp server_config.example.json dist/staging/
+          cp README.md dist/staging/
+          cp LICENSE dist/staging/
+          cp CHANGELOG.md dist/staging/
+
+      - name: Archive
+        run: |
+          mkdir -p dist/release
+          cd dist/staging
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip -q -X -r "../release/${{ steps.name.outputs.archive }}" .
+          else
+            tar -czf "../release/${{ steps.name.outputs.archive }}" .
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ steps.name.outputs.base }}
+          path: dist/release/${{ steps.name.outputs.archive }}
+          retention-days: 1
+          if-no-files-found: error
+
+  sign-and-publish:
+    name: sign + publish release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          pattern: archive-*
+          merge-multiple: true
+
+      - name: Compute SHA-256 checksums
+        id: checksums
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          checksums="dist/release/BeaconGate-${tag}-checksums.txt"
+          ( cd dist/release && sha256sum *.tar.gz *.zip 2>/dev/null > "../../${checksums}" )
+          # The above puts the file at /BeaconGate-${tag}-checksums.txt;
+          # move it next to the archives.
+          mv "BeaconGate-${tag}-checksums.txt" "${checksums}"
+          echo "checksums=${checksums}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: cosign sign-blob (checksums)
+        run: |
+          cosign sign-blob --yes \
+            --output-signature "${{ steps.checksums.outputs.checksums }}.sig" \
+            --output-certificate "${{ steps.checksums.outputs.checksums }}.cert" \
+            "${{ steps.checksums.outputs.checksums }}"
+
+      - name: Extract changelog section
+        id: changelog
+        run: |
+          tag="${{ steps.checksums.outputs.tag }}"
+          # Pull the section from CHANGELOG.md between [tag] heading and the next [.
+          # Falls back to a generic "see CHANGELOG.md" stub if the section isn't found.
+          notes_file="$(mktemp)"
+          if grep -qE "^## \[${tag#v}\]" CHANGELOG.md; then
+            awk -v tag="${tag#v}" '
+              $0 ~ "^## \\["tag"\\]" {flag=1; next}
+              flag && /^## \[/ {exit}
+              flag {print}
+            ' CHANGELOG.md > "$notes_file"
+          else
+            echo "Release ${tag}. See CHANGELOG.md for details." > "$notes_file"
+          fi
+          {
+            echo 'notes<<EOF'
+            cat "$notes_file"
+            echo ''
+            echo '---'
+            echo ''
+            echo '### Verifying this release'
+            echo ''
+            echo 'Every artifact below is cosign-signed by GitHub Actions running this repo'\''s release workflow. Verify before extracting:'
+            echo ''
+            echo '```sh'
+            echo "cosign verify-blob \\"
+            echo "  --certificate BeaconGate-${tag}-checksums.txt.cert \\"
+            echo "  --signature  BeaconGate-${tag}-checksums.txt.sig \\"
+            echo "  --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.+' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  BeaconGate-${tag}-checksums.txt"
+            echo '```'
+            echo ''
+            echo '`scripts/install.sh` runs this verification automatically.'
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.checksums.outputs.tag }}
+          name: BeaconGate ${{ steps.checksums.outputs.tag }}
+          body: ${{ steps.changelog.outputs.notes }}
+          files: |
+            dist/release/*.tar.gz
+            dist/release/*.zip
+            ${{ steps.checksums.outputs.checksums }}
+            ${{ steps.checksums.outputs.checksums }}.sig
+            ${{ steps.checksums.outputs.checksums }}.cert
+
+  ghcr:
+    name: build + sign GHCR image
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/beacongate-server
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+
+      - name: Build + push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ops/docker/Dockerfile.server
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: cosign sign image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          for tag in ${{ steps.meta.outputs.tags }}; do
+            cosign sign --yes "${tag}@${DIGEST}"
+          done

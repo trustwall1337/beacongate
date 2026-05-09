@@ -44,6 +44,14 @@ isn't your doc — see [android-termux.md](android-termux.md) instead.
 
 ## Build the bundle
 
+If you installed BeaconGate from a release tarball (recommended for
+v1.1.0+), the `beacongate-client-android-arm64` binary is already in
+the tarball — verified by `cosign verify-blob` at unpack time. You
+don't need to rebuild.
+
+If you built from source (or want to refresh the Android binary
+locally):
+
 ```sh
 make build-android
 ops/prepare-bundle.sh \
@@ -56,6 +64,16 @@ ops/prepare-bundle.sh \
 `prepare-bundle.sh` runs `beacongate-client -validate-only` on the
 config before zipping. **A bundle is never produced from a
 config that fails validation** — fail-closed by design.
+
+**Note on supply-chain integrity:** the operator-prepared bundle's
+ZIP is *not* cosign-signed (it's built locally on your machine, not
+by the release pipeline). The trust chain for the bundle is:
+`cosign-signed binary in the release tarball → unpacked into your
+local bin/ → re-zipped with config and verify.sh by you → SHA-256
+of the resulting ZIP printed for out-of-band check`. The friend
+receiving the bundle is trusting *you* (not GitHub's release pipeline)
+that the ZIP is what you intended. The SHA-256 check makes that
+trust verifiable.
 
 ---
 

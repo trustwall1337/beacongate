@@ -54,19 +54,53 @@ func TestApplyMigrationsAcceptsCaseAndWhitespace(t *testing.T) {
 	}
 }
 
-func TestApplyMigrationsLeavesAppsScriptAlone(t *testing.T) {
+func TestApplyMigrationsConvertsScriptKeysStringToArray(t *testing.T) {
 	raw := map[string]any{
 		"transport": map[string]any{
 			"type":    "appsscript",
-			"options": map[string]any{"script_keys": "ID1"},
+			"options": map[string]any{"script_keys": "ID1,ID2", "script_accounts": "alpha,beta"},
+		},
+	}
+	changes := applyMigrations(raw)
+	if len(changes) != 2 {
+		t.Fatalf("want 2 changes (script_keys array conversion + script_accounts removal), got %d: %v", len(changes), changes)
+	}
+	opts := raw["transport"].(map[string]any)["options"].(map[string]any)
+	got, ok := opts["script_keys"].([]any)
+	if !ok {
+		t.Fatalf("script_keys should be []any after migration, got %T", opts["script_keys"])
+	}
+	want := []any{
+		map[string]any{"id": "ID1", "account": "alpha"},
+		map[string]any{"id": "ID2", "account": "beta"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+	if _, present := opts["script_accounts"]; present {
+		t.Errorf("script_accounts should have been removed (folded into script_keys)")
+	}
+}
+
+func TestApplyMigrationsLeavesArrayShapeAlone(t *testing.T) {
+	// If script_keys is already in the array-of-objects shape, the
+	// migration leaves it alone (idempotent).
+	raw := map[string]any{
+		"transport": map[string]any{
+			"type": "appsscript",
+			"options": map[string]any{
+				"script_keys": []any{
+					map[string]any{"id": "ID1", "account": "alpha"},
+				},
+			},
 		},
 	}
 	before := deepCopyMap(raw)
 	if changes := applyMigrations(raw); len(changes) != 0 {
-		t.Fatalf("appsscript should not be migrated, got %d changes: %v", len(changes), changes)
+		t.Fatalf("array-shape config should not be migrated, got %d changes: %v", len(changes), changes)
 	}
 	if !reflect.DeepEqual(raw, before) {
-		t.Fatalf("mutated appsscript config: %+v vs %+v", raw, before)
+		t.Fatalf("mutated already-migrated config: %+v vs %+v", raw, before)
 	}
 }
 

@@ -148,10 +148,10 @@ func buildTransport(cfg *config.ClientConfig) (transport.ClientTransport, error)
 func buildHTTPSTransport(cfg *config.ClientConfig) (transport.ClientTransport, error) {
 	httpsCfg := httpstransport.Config{
 		URL:          cfg.Server.URL,
-		HealthURL:    cfg.Transport.Options["health_url"],
-		FrontingHost: httpstransport.SanitizeFrontingHost(cfg.Transport.Options["fronting_host"]),
+		HealthURL:    cfg.Transport.OptionString("health_url"),
+		FrontingHost: httpstransport.SanitizeFrontingHost(cfg.Transport.OptionString("fronting_host")),
 	}
-	if path := strings.TrimSpace(cfg.Transport.Options["pinned_roots_path"]); path != "" {
+	if path := strings.TrimSpace(cfg.Transport.OptionString("pinned_roots_path")); path != "" {
 		pem, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("https transport: read pinned_roots_path %q: %w", path, err)
@@ -162,36 +162,70 @@ func buildHTTPSTransport(cfg *config.ClientConfig) (transport.ClientTransport, e
 }
 
 // buildAppsScriptTransport assembles an appsscript transport from
-// transport.options. Required: script_keys (comma-separated). Optional:
-// script_accounts (parallel labels), google_host, sni (comma-separated
-// rotation list).
+// transport.options.
+//
+// **`script_keys` accepts both shapes** (per v1.1.0 schema flex):
+//   - legacy comma-separated string: "ID1,ID2"
+//   - Goose-natural array-of-objects: [{"id":"ID1","account":"alpha"}, ...]
+//
+// `script_accounts` is the parallel labels list (legacy comma-separated
+// string only); when `script_keys` uses the object form, account labels
+// are embedded per-entry and `script_accounts` is ignored.
 //
 // In appsscript mode, server.url MUST be empty/omitted — the script
-// URLs are constructed from script_keys. We enforce that here so a
-// stale server.url doesn't silently bypass the disguise.
+// URLs are constructed from script_keys. Validate() in the config
+// loader catches this; this defensive check is belt-and-suspenders
+// in case BuildAppsScriptTransport is ever called from a code path
+// that bypasses LoadClient.
 func buildAppsScriptTransport(cfg *config.ClientConfig) (transport.ClientTransport, error) {
 	if cfg.Server.URL != "" {
 		return nil, fmt.Errorf("appsscript transport: server.url must be empty in appsscript mode (got %q); the script URL is constructed from transport.options.script_keys", cfg.Server.URL)
 	}
-	rawKeys := cfg.Transport.Options["script_keys"]
-	if strings.TrimSpace(rawKeys) == "" {
-		return nil, fmt.Errorf("appsscript transport: transport.options.script_keys is required")
+	scriptKeys, err := config.ParseScriptKeys(cfg.Transport.Options["script_keys"])
+	if err != nil {
+		return nil, fmt.Errorf("appsscript transport: %w", err)
 	}
-	keys := splitAndTrim(rawKeys)
-	if len(keys) == 0 {
+	if len(scriptKeys) == 0 {
 		return nil, fmt.Errorf("appsscript transport: transport.options.script_keys parsed to zero entries")
 	}
-	accounts := splitAndTrim(cfg.Transport.Options["script_accounts"])
+	keys := config.ScriptKeyIDs(scriptKeys)
+	accounts := config.ScriptKeyAccounts(scriptKeys)
+	// If the operator used the legacy string shape and supplied a
+	// parallel script_accounts string, splice those in over the
+	// (currently empty) per-key accounts.
+	if hasOnlyEmptyStrings(accounts) {
+		if legacy := splitAndTrim(cfg.Transport.OptionString("script_accounts")); len(legacy) > 0 {
+			// Use legacy values up to len(keys); pad with "" if shorter.
+			merged := make([]string, len(keys))
+			for i := range merged {
+				if i < len(legacy) {
+					merged[i] = legacy[i]
+				}
+			}
+			accounts = merged
+		}
+	}
 
 	fronting := appsscript.FrontingConfig{
-		GoogleIP: cfg.Transport.Options["google_host"],
-		SNIHosts: splitAndTrim(cfg.Transport.Options["sni"]),
+		GoogleIP: cfg.Transport.OptionString("google_host"),
+		SNIHosts: splitAndTrim(cfg.Transport.OptionString("sni")),
 	}
 	return appsscript.New(appsscript.Config{
 		ScriptKeys:     keys,
 		ScriptAccounts: accounts,
 		Fronting:       fronting,
 	})
+}
+
+// hasOnlyEmptyStrings reports whether the slice has zero non-empty
+// entries.
+func hasOnlyEmptyStrings(s []string) bool {
+	for _, v := range s {
+		if v != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // runValidateOnly loads and validates the config at cfgPath, prints a

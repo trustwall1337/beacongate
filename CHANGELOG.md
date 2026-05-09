@@ -17,6 +17,67 @@ interoperate. Also closes the Phase 1 success condition: an operator can
 now prepare a single bundle for an Android end-user and the user runs it
 in Termux with NekoBox / v2rayNG.
 
+### Added — v1.1.0 release-readiness (operator UX + supply-chain integrity)
+
+- **uTLS Chrome 131 ClientHello fingerprinting** in the `appsscript`
+  transport (`engine/transport/appsscript/utls_dial.go`). Defeats
+  JA3/JA4-fingerprinting at the wire layer — every comparable
+  project (Goose, MasterHttpRelayVPN) leaves this unfixed. Library
+  pinned to `github.com/refraction-networking/utls v1.8.2`; profile
+  pinned to `HelloChrome_131` (deterministic, not `_Auto`). Bump
+  cadence in [`docs/uTLS-fingerprint-cadence.md`](docs/uTLS-fingerprint-cadence.md):
+  one Chrome major per BeaconGate minor.
+- **Tag-driven release pipeline** at
+  [`.github/workflows/release.yml`](.github/workflows/release.yml).
+  Push a `v*` tag → 6 archives (linux/macOS/windows/android) +
+  SHA-256 checksums + cosign-signed checksums + GHCR image
+  (linux/amd64,arm64) + cosign-signed image. All signing uses
+  GitHub OIDC + sigstore; no operator key management.
+- **`scripts/install.sh`** — VPS one-liner.
+  `curl -fsSL .../install.sh | bash` downloads the latest release,
+  **verifies the cosign signature** before unpacking (not just
+  SHA-256 — bit-flip-only protection isn't threat-model-relevant for
+  a censorship-evasion tool), generates an AES key, writes
+  `/etc/beacongate/server_config.json`, and installs the systemd
+  unit. Idempotent.
+- **`make release` target** that mirrors what the release pipeline
+  builds in CI — local dry-run support without pushing a tag.
+- **`script_keys` accepts both shapes**
+  (`engine/config/script_keys.go`): legacy comma-separated string
+  AND Goose-natural array-of-objects
+  `[{"id":"...","account":"..."}]`. Backward compatible.
+  `migrate-config` rewrites string → array form.
+- **README rewrite** — operator-first structure. Tagline leads with
+  the end-user property; "What this is NOT" consent block surfaces
+  the four residual risks BEFORE setup so end users in censored
+  countries can give informed consent. Adds Important Notes /
+  Disclaimer / Support sections. Includes the explicit "no local CA
+  cert ever" line clarifying BeaconGate is unlike MasterHttpRelayVPN-
+  style local-MITM designs.
+
+### Changed
+
+- **Breaking source-API change:**
+  `engine/config.ClientTransportConfig.Options` is now
+  `map[string]any` (was `map[string]string`). End-user JSON configs
+  are backward compatible (a string-valued option still parses
+  correctly), but anyone vendoring this struct directly needs to
+  update. Use the new `OptionString(key)` helper for stdlib-equivalent
+  ergonomics.
+- **TLS-fingerprint residual risk closed for the default build.**
+  [`SECURITY.md`](SECURITY.md) updated to reflect that the JA3/JA4
+  gap previously documented as unfixed is now closed via uTLS, with
+  caveats about pinning regression and future fingerprinting
+  techniques.
+- **`engine/transport/appsscript/fronting.go`** rewritten to use the
+  uTLS dialer via `http.Transport.DialTLSContext` and a wrapper
+  `net.Conn` that bridges `utls.ConnectionState` →
+  `tls.ConnectionState` so HTTP/2 ALPN routing still works.
+- **README.md / docs/architecture.md / docs/deployment.md /
+  docs/troubleshooting.md / docs/operator-handoff-checklist.md**
+  updated to reflect uTLS, cosign-verified releases, and the
+  array-of-objects `script_keys` shape.
+
 ### Added — Phase 1 finish (Android-via-Termux + minimal client control)
 
 - **`make build-android`** — cross-compile `beacongate-client` for

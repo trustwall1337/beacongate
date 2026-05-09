@@ -122,7 +122,7 @@ func TestValidateAppsScriptRequiresEmptyServerURL(t *testing.T) {
 		ClientID:   "c",
 		ListenAddr: "127.0.0.1:1080",
 		Server:     ClientServerConfig{URL: "https://relay.example.com/tunnel", Key: enc},
-		Transport:  ClientTransportConfig{Type: "appsscript", Options: map[string]string{"script_keys": "ID"}},
+		Transport:  ClientTransportConfig{Type: "appsscript", Options: map[string]any{"script_keys": "ID"}},
 	}
 	if err := c.Validate(); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("expected ErrInvalidConfig for appsscript+server.url, got %v", err)
@@ -144,7 +144,7 @@ func TestValidateAppsScriptRequiresEmptyServerURL(t *testing.T) {
 		ClientID:   "c",
 		ListenAddr: "127.0.0.1:1080",
 		Server:     ClientServerConfig{Key: enc},
-		Transport:  ClientTransportConfig{Type: "appsscript", Options: map[string]string{"script_keys": "ID1,ID2"}},
+		Transport:  ClientTransportConfig{Type: "appsscript", Options: map[string]any{"script_keys": "ID1,ID2"}},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("unexpected error for valid appsscript config: %v", err)

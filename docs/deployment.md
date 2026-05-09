@@ -49,7 +49,46 @@ the Apps Script hop.
   balancer). The server itself speaks plain HTTP and expects to be
   fronted with TLS.
 - A DNS hostname pointing at the VPS (e.g. `relay.your-domain.com`).
-- Go 1.25+ if building from source. Otherwise a release binary.
+- A release binary (recommended) or Go 1.25+ to build from source.
+
+## A1b. Get the binaries (recommended path)
+
+Download the latest release for your VPS architecture from
+<https://github.com/trustwall1337/beacongate/releases>. Each release
+ships:
+
+- `BeaconGate-vX.Y.Z-linux-{amd64,arm64}.tar.gz` (and macOS, Windows, Android variants)
+- `BeaconGate-vX.Y.Z-checksums.txt` — SHA-256 of every archive
+- `BeaconGate-vX.Y.Z-checksums.txt.sig` + `.cert` — cosign signature
+
+**Verify the cosign signature before extracting** (sigstore + GitHub
+OIDC; no operator key management):
+
+```sh
+# Install cosign (one-time):
+# Linux/macOS: brew install cosign  -or-  go install github.com/sigstore/cosign/v2/cmd/cosign@latest
+
+# Verify checksums.txt was signed by this repo's release workflow:
+cosign verify-blob \
+  --certificate BeaconGate-vX.Y.Z-checksums.txt.cert \
+  --signature  BeaconGate-vX.Y.Z-checksums.txt.sig \
+  --certificate-identity-regexp 'https://github.com/trustwall1337/beacongate/.+' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  BeaconGate-vX.Y.Z-checksums.txt
+
+# Then verify your tarball matches:
+sha256sum -c BeaconGate-vX.Y.Z-checksums.txt --ignore-missing
+
+# Extract:
+tar -xzf BeaconGate-vX.Y.Z-linux-amd64.tar.gz
+sudo install -m755 beacongate-{client,server,admin} /usr/local/bin/
+```
+
+If `cosign verify-blob` fails, **stop**: the artifact has been
+tampered with or the signing identity has changed. Don't extract.
+
+The fast-track install script (`curl -fsSL …/install.sh | bash`)
+runs the same verification before unpacking — see `scripts/install.sh`.
 
 ## A2. Generate a shared key
 
@@ -174,7 +213,15 @@ Script web app, so on the wire the client is talking to Google.
 - A Google account, or several. Apps Script enforces a ~20,000
   invocations/day quota per account that resets at midnight Pacific.
   Multiple accounts spread the ceiling.
-- Go 1.25+ if building from source. Otherwise a release binary.
+- A release binary (recommended) or Go 1.25+ to build from source.
+
+## B1b. Get the binaries
+
+Same as Playbook A1b: download the matching release tarball and
+**verify the cosign signature** before extracting. See [A1b](#a1b-get-the-binaries-recommended-path)
+above for the verification commands. The binaries (and the cosign
+verification step) are the same regardless of which transport mode
+you'll run.
 
 > **NOTE:** Unlike Playbook A, the VPS does NOT need to be behind a
 > TLS-terminating reverse proxy. The client never connects to your VPS

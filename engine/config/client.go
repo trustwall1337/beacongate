@@ -27,9 +27,37 @@ type ClientServerConfig struct {
 	Key string `json:"key"`
 }
 
+// ClientTransportConfig holds transport-mode and a free-form options
+// map.
+//
+// **As of v1.1.0 the Options value type is `any`, not `string`.** This
+// is a breaking source-level API change for anyone vendoring this
+// package; end-user JSON configs are backward compatible (a JSON
+// string-valued option still parses correctly). The change is needed
+// to support `script_keys` in the Goose-natural array-of-objects
+// shape: `[{"id": "...", "account": "..."}]`. See
+// engine/config/script_keys.go for the parser.
+//
+// Use the OptionString helper for string-valued options to get the
+// stdlib-equivalent ergonomics of the old type.
 type ClientTransportConfig struct {
-	Type    string            `json:"type"`
-	Options map[string]string `json:"options,omitempty"`
+	Type    string         `json:"type"`
+	Options map[string]any `json:"options,omitempty"`
+}
+
+// OptionString returns the string value for the given key, or "" if
+// the key is missing or holds a non-string value.
+//
+// Use this for transport options that are always string-valued (most
+// of them). For `script_keys`, which can be a string OR an array of
+// strings/objects, call ParseScriptKeys instead.
+func (c *ClientTransportConfig) OptionString(key string) string {
+	v, ok := c.Options[key]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
 }
 
 func (c *ClientConfig) Validate() error {
@@ -58,7 +86,15 @@ func (c *ClientConfig) Validate() error {
 		if c.Server.URL != "" {
 			return fmt.Errorf("%w: server.url must be empty for transport.type=\"appsscript\" (the script URL is built from transport.options.script_keys; got %q)", ErrInvalidConfig, c.Server.URL)
 		}
-		if c.Transport.Options["script_keys"] == "" {
+		// script_keys can be either a comma-separated string (legacy)
+		// or an array of strings/objects (Goose-natural). ParseScriptKeys
+		// normalizes both. Empty (nil, "", or []) is rejected here because
+		// appsscript mode requires at least one deployment.
+		keys, err := ParseScriptKeys(c.Transport.Options["script_keys"])
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+		}
+		if len(keys) == 0 {
 			return fmt.Errorf("%w: transport.options.script_keys required for transport.type=\"appsscript\"", ErrInvalidConfig)
 		}
 	}

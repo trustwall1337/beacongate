@@ -84,8 +84,18 @@ func TestLintNoQuotaPollingOnRequestPath(t *testing.T) {
 // every TLS handshake the appsscript transport opens must be TLS 1.3
 // minimum. Downgrade attempts are a fingerprintable network-shape
 // signal that breaks the disguise.
+//
+// As of v1.1.0 (uTLS integration) the package's TLS handshakes go
+// through utls.Config literals, not tls.Config. The lint accepts
+// either; both have a MinVersion field that must equal VersionTLS13.
 func TestLintTLSMinVersionIsTLS13(t *testing.T) {
 	const wantMinVersion = "VersionTLS13"
+	// Accept either pkg-name in the literal: stdlib tls.Config or
+	// uTLS utls.Config. Both carry MinVersion with identical semantics.
+	acceptedPkgs := map[string]struct{}{
+		"tls":  {},
+		"utls": {},
+	}
 	fset := token.NewFileSet()
 	// parser.ParseDir is marked deprecated in Go 1.25 because it
 	// doesn't honor build tags. We don't have build-tagged files in
@@ -112,7 +122,11 @@ func TestLintTLSMinVersionIsTLS13(t *testing.T) {
 				if !ok {
 					return true
 				}
-				if pkgIdent, ok := sel.X.(*ast.Ident); !ok || pkgIdent.Name != "tls" || sel.Sel.Name != "Config" {
+				pkgIdent, ok := sel.X.(*ast.Ident)
+				if !ok || sel.Sel.Name != "Config" {
+					return true
+				}
+				if _, accepted := acceptedPkgs[pkgIdent.Name]; !accepted {
 					return true
 				}
 				foundTLSConfig = true
@@ -133,14 +147,14 @@ func TestLintTLSMinVersionIsTLS13(t *testing.T) {
 					}
 				}
 				if !hasCorrectMinVersion {
-					t.Errorf("A9 corollary violation in %s: tls.Config without MinVersion=tls.%s — TLS 1.3 minimum is part of the disguise",
-						fname, wantMinVersion)
+					t.Errorf("A9 corollary violation in %s: %s.Config without MinVersion=tls.%s — TLS 1.3 minimum is part of the disguise",
+						fname, pkgIdent.Name, wantMinVersion)
 				}
 				return true
 			})
 		}
 	}
 	if !foundTLSConfig {
-		t.Fatal("expected at least one tls.Config literal in the appsscript package; lint may be misconfigured")
+		t.Fatal("expected at least one tls.Config or utls.Config literal in the appsscript package; lint may be misconfigured")
 	}
 }

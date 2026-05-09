@@ -23,8 +23,13 @@ the real outbound TCP connection on their behalf.
 > tunnels every batch through a user-deployed Google Apps Script web
 > app, so the wire path terminates at a real Google IP with
 > `SNI=www.google.com` and HTTP `Host: script.google.com` — that is
-> the actual censorship-evasion property. The deployment-mode matrix
-> in [deployment.md](deployment.md) compares the two.
+> the actual censorship-evasion property. The TLS handshake itself
+> is performed by [uTLS](https://github.com/refraction-networking/utls)
+> presenting a pinned Chrome 131 fingerprint, so a passive
+> JA3/JA4-fingerprinting observer sees what looks like a real Chrome
+> browser. The deployment-mode matrix in [deployment.md](deployment.md)
+> compares the two transports; [uTLS-fingerprint-cadence.md](uTLS-fingerprint-cadence.md)
+> documents the pin and bump policy.
 
 ---
 
@@ -383,7 +388,13 @@ Who has to trust whom:
 - **A network observer between client and server** sees only HTTPS
   POST traffic, padded and encrypted. They learn that *something* is
   using the relay endpoint, but not what destinations are visited or
-  what bytes flow.
+  what bytes flow. As of v1.1, with the `appsscript` transport, the
+  observer sees TLS to a Google IP with a Chrome-131 ClientHello
+  fingerprint (uTLS) and HTTP `Host: script.google.com` — they cannot
+  distinguish this from a real Chrome browser using Apps Script.
+  See [uTLS-fingerprint-cadence.md](uTLS-fingerprint-cadence.md)
+  for the pin policy and what this defense does NOT cover (traffic
+  patterns, Google-side classifiers).
 - **A network observer between server and destination** sees ordinary
   outbound TCP/TLS traffic from the server's IP. They cannot tell
   which client originated it.

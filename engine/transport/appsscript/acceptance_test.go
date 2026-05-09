@@ -74,39 +74,34 @@ func TestA7_TCPDestinationIsConfiguredGoogleIP(t *testing.T) {
 
 // A7 #3 — TLS SNI matches the configured rotation entry.
 //
-// We construct a client via newFrontedClient with a known SNI host and
-// then introspect the http.Transport's TLSClientConfig to confirm
-// ServerName is set to that value. This is what the TLS layer will
-// emit in the ClientHello.
+// We verify the uTLS Config that drives the dial (per utls_dial.go's
+// buildUTLSConfig). With v1.1.0's uTLS integration, the TLS handshake
+// is performed by github.com/refraction-networking/utls — http.Transport
+// no longer holds a TLSClientConfig, so we introspect the uTLS Config
+// directly. The disguise invariants we enforce are identical: SNI,
+// minimum TLS 1.3, and ALPN ["h2", "http/1.1"] pinned.
 func TestA7_TLSSNIMatchesConfiguredHostname(t *testing.T) {
 	const sni = "mail.google.com"
-	cache := tls.NewLRUClientSessionCache(8)
-	client := newFrontedClient("203.0.113.42:443", sni, 30*time.Second, cache)
-	tr, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("client.Transport not *http.Transport: %T", client.Transport)
-	}
-	if tr.TLSClientConfig == nil {
-		t.Fatalf("TLSClientConfig is nil — TLS hardening not applied")
-	}
-	if tr.TLSClientConfig.ServerName != sni {
-		t.Fatalf("A7 #3 violation: TLSClientConfig.ServerName = %q, want %q", tr.TLSClientConfig.ServerName, sni)
+	cache := newUTLSSessionCache()
+	cfg := buildUTLSConfig(sni, cache, []string{"h2", "http/1.1"})
+	if cfg.ServerName != sni {
+		t.Fatalf("A7 #3 violation: utls Config.ServerName = %q, want %q", cfg.ServerName, sni)
 	}
 	// TLS 1.3 minimum is part of the disguise — TLS 1.2 ClientHello
 	// looks different on the wire and weakens the "looks like
 	// modern Google traffic" property.
-	if tr.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+	if cfg.MinVersion != tls.VersionTLS13 {
 		t.Fatalf("A7 #3 corollary: MinVersion = 0x%04x, want TLS 1.3 (0x%04x)",
-			tr.TLSClientConfig.MinVersion, tls.VersionTLS13)
+			cfg.MinVersion, tls.VersionTLS13)
 	}
 	// ALPN must be pinned so resumed sessions match the prewarm dial.
 	wantALPN := []string{"h2", "http/1.1"}
-	if len(tr.TLSClientConfig.NextProtos) != len(wantALPN) {
-		t.Fatalf("A7 #3 corollary: ALPN = %v, want %v", tr.TLSClientConfig.NextProtos, wantALPN)
+	if len(cfg.NextProtos) != len(wantALPN) {
+		t.Fatalf("A7 #3 corollary: ALPN = %v, want %v", cfg.NextProtos, wantALPN)
 	}
 	for i, p := range wantALPN {
-		if tr.TLSClientConfig.NextProtos[i] != p {
-			t.Fatalf("A7 #3 corollary: ALPN[%d] = %q, want %q", i, tr.TLSClientConfig.NextProtos[i], p)
+		if cfg.NextProtos[i] != p {
+			t.Fatalf("A7 #3 corollary: ALPN[%d] = %q, want %q", i, cfg.NextProtos[i], p)
 		}
 	}
 }

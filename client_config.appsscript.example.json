@@ -7,8 +7,10 @@
   "transport": {
     "type": "appsscript",
     "options": {
-      "script_keys": "DEPLOYMENT_ID_1,DEPLOYMENT_ID_2",
-      "script_accounts": "alpha-account,beta-account",
+      "script_keys": [
+        {"id": "DEPLOYMENT_ID_1", "account": "alpha-account"},
+        {"id": "DEPLOYMENT_ID_2", "account": "beta-account"}
+      ],
       "google_host": "216.239.38.120:443",
       "sni": "www.google.com,mail.google.com,accounts.google.com"
     }

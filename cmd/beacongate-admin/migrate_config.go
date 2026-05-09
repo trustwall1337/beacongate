@@ -97,6 +97,33 @@ func applyMigrations(raw map[string]any) []string {
 		changes = append(changes, `transport.type: "google" → "https" (package was renamed in v1.1)`)
 	}
 
+	// Migration 2: transport.options.script_keys comma-separated string
+	// → array-of-objects. The string form still works (loader accepts
+	// both), but the array shape is the canonical Goose-natural form
+	// going forward. Also migrate parallel script_accounts (legacy
+	// comma-separated string) into per-entry account labels.
+	if opts, ok := transport["options"].(map[string]any); ok {
+		if rawKeys, ok := opts["script_keys"].(string); ok && strings.TrimSpace(rawKeys) != "" {
+			ids := splitCommaTrim(rawKeys)
+			accounts := splitCommaTrim(stringOrEmpty(opts["script_accounts"]))
+			arr := make([]any, len(ids))
+			for i, id := range ids {
+				entry := map[string]any{"id": id}
+				if i < len(accounts) && accounts[i] != "" {
+					entry["account"] = accounts[i]
+				}
+				arr[i] = entry
+			}
+			opts["script_keys"] = arr
+			changes = append(changes,
+				`transport.options.script_keys: "ID1,ID2" → [{"id":"ID1"},{"id":"ID2"}] (Goose-natural shape; legacy string still accepted)`)
+			if _, hadAccounts := opts["script_accounts"]; hadAccounts {
+				delete(opts, "script_accounts")
+				changes = append(changes, `transport.options.script_accounts: removed (folded into script_keys[*].account)`)
+			}
+		}
+	}
+
 	// Future migrations layer on here. Each should:
 	//   1. Detect the old shape.
 	//   2. Mutate raw to the new shape.
@@ -105,4 +132,24 @@ func applyMigrations(raw map[string]any) []string {
 	// dependencies inline.
 
 	return changes
+}
+
+func splitCommaTrim(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func stringOrEmpty(v any) string {
+	s, _ := v.(string)
+	return s
 }

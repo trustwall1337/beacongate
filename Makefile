@@ -1,6 +1,6 @@
 .PHONY: all ci clean help \
         go-build go-build-android go-test go-race go-vet go-fmt go-fmt-check go-lint go-tidy go-bench go-fuzz \
-        build build-android test race vet fmt fmt-check lint tidy bench fuzz \
+        build build-android test race vet fmt fmt-check lint tidy bench fuzz release \
         desktop-build desktop-test mobile-build mobile-test \
         docker-build docker-init docker-up docker-down docker-logs docker-status docker-clean
 
@@ -19,6 +19,7 @@ help:
 	@echo "Top-level targets:"
 	@echo "  make build         - build everything that exists today (currently: Go)"
 	@echo "  make build-android - cross-compile the client for Android (linux/arm64, runs in Termux)"
+	@echo "  make release       - build all 6 release archives locally (dry-run of release pipeline)"
 	@echo "  make test          - run all tests (currently: Go)"
 	@echo "  make race          - tests with -race detector"
 	@echo "  make bench         - run benchmarks (engine/transport/appsscript)"
@@ -131,6 +132,43 @@ mobile-test:
 build: go-build
 build-android: go-build-android
 test: go-test
+
+# release builds all six release archives locally (mirrors what
+# .github/workflows/release.yml does in CI). Output: dist/release/.
+# Useful for testing the release pipeline without pushing a tag.
+# Does NOT run cosign signing — that needs GitHub OIDC and only
+# runs in CI.
+release:
+	@rm -rf dist/release dist/staging
+	@mkdir -p dist/release
+	@TAG="$$(git describe --tags --always 2>/dev/null || echo dev)"; \
+	for target in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64 android-arm64; do \
+	  case "$$target" in \
+	    linux-*)   GOOS=linux;   GOARCH=$${target#linux-} ;; \
+	    darwin-*)  GOOS=darwin;  GOARCH=$${target#darwin-} ;; \
+	    windows-*) GOOS=windows; GOARCH=$${target#windows-} ;; \
+	    android-*) GOOS=linux;   GOARCH=$${target#android-} ;; \
+	  esac; \
+	  ext=""; if [ "$$GOOS" = "windows" ]; then ext=".exe"; fi; \
+	  rm -rf dist/staging && mkdir -p dist/staging; \
+	  for cmd in beacongate-client beacongate-server beacongate-admin; do \
+	    GOOS=$$GOOS GOARCH=$$GOARCH CGO_ENABLED=0 \
+	      $(GO) build -trimpath -ldflags="-s -w" \
+	      -o "dist/staging/$$cmd$$ext" "./cmd/$$cmd" || exit 1; \
+	  done; \
+	  cp client_config.example.json client_config.appsscript.example.json server_config.example.json README.md LICENSE CHANGELOG.md dist/staging/; \
+	  base="BeaconGate-$$TAG-$$target"; \
+	  if [ "$$GOOS" = "windows" ]; then \
+	    ( cd dist/staging && zip -q -X -r "../release/$$base.zip" . ); \
+	  else \
+	    ( cd dist/staging && tar -czf "../release/$$base.tar.gz" . ); \
+	  fi; \
+	  echo "  built dist/release/$$base"; \
+	done; \
+	( cd dist/release && sha256sum *.tar.gz *.zip > "BeaconGate-$$TAG-checksums.txt" ); \
+	echo "release archives in dist/release/"
+
+
 race: go-race
 vet: go-vet
 fmt: go-fmt

@@ -89,9 +89,19 @@ Residual risks NOT eliminated by this transport:
   distribution, per-batch timing. A determined adversary with full
   packet capture can fingerprint these patterns even though the
   bytes are encrypted.
-- **TLS-fingerprint analysis (JA3 / JA4)** — Go's `crypto/tls`
-  ClientHello differs from common browsers. A motivated DPI vendor
-  may detect non-browser TLS clients to Google.
+- **TLS-fingerprint analysis (JA3 / JA4)** — **Closed in v1.1.0** for
+  the default build. The `appsscript` transport now uses
+  [`github.com/refraction-networking/utls`](https://github.com/refraction-networking/utls)
+  to emit a Chrome 131 ClientHello byte-identical to a real browser.
+  See [`docs/uTLS-fingerprint-cadence.md`](docs/uTLS-fingerprint-cadence.md)
+  for the pin and bump policy. **Residual sub-risks:**
+  (a) the pinned Chrome version drifts behind real-world Chrome
+  between BeaconGate minor releases; the bump cadence is the
+  mitigation. (b) New fingerprinting techniques beyond JA3/JA4
+  could emerge; uTLS's coverage is best-known-state, not future-proof.
+  (c) Compile-time tampering or a forced downgrade to stdlib `tls`
+  via build tags re-opens the gap — operators relying on the disguise
+  should verify the JA3 hash on their built binary.
 - **Google-side classifiers** — Google can see the encrypted bytes
   pass through Apps Script and could in principle deploy
   classifiers; the transport only protects against off-Google
