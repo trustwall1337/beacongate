@@ -141,10 +141,7 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           checksums="dist/release/BeaconGate-${tag}-checksums.txt"
-          ( cd dist/release && sha256sum *.tar.gz *.zip 2>/dev/null > "../../${checksums}" )
-          # The above puts the file at /BeaconGate-${tag}-checksums.txt;
-          # move it next to the archives.
-          mv "BeaconGate-${tag}-checksums.txt" "${checksums}"
+          ( cd dist/release && sha256sum *.tar.gz *.zip 2>/dev/null > "BeaconGate-${tag}-checksums.txt" )
           echo "checksums=${checksums}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
@@ -257,7 +254,10 @@ jobs:
       - name: cosign sign image
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/beacongate-server
         run: |
-          for tag in ${{ steps.meta.outputs.tags }}; do
-            cosign sign --yes "${tag}@${DIGEST}"
-          done
+          # Signing by digest covers every tag pointing at that
+          # manifest, so we sign once. (Earlier per-tag for-loop
+          # broke on the multi-line `steps.meta.outputs.tags`
+          # interpolation — bash saw newlines mid-expression.)
+          cosign sign --yes "${IMAGE}@${DIGEST}"
