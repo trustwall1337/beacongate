@@ -137,13 +137,42 @@ tar -C "$INSTALL_DIR" -xzf "$ARCHIVE" "$BINARY_NAME" 2>/dev/null \
 chmod +x "$BINARY_PATH"
 rm -f "$ARCHIVE"
 
-# --------- 7. apply --import if given ---------
+# --------- 7. obtain a bg:// link ---------
+# Two ways the link can arrive:
+#   (a) --import flag on the install command (one-paste flow with a
+#       single big QR encoding everything)
+#   (b) interactive paste — friend scans a separate, smaller bg://
+#       QR with their phone camera, copies it, pastes here
+# (b) is more scannable because two small QRs are easier to capture
+# from a screen than one Version-25 dense QR. The script supports
+# both transparently — if --import is empty AND no config exists yet,
+# we prompt.
+if [[ -z "$IMPORT_LINK" && ! -f "$CONFIG_PATH" ]]; then
+    cat <<'PROMPT'
+
+==========================================================
+  Paste your operator's bg:// share-link
+==========================================================
+
+Scan the QR your operator sent (or paste the link from a message).
+The link looks like: bg://config?d=...
+
+Paste it now and press Enter, then Ctrl-D to confirm:
+PROMPT
+    IMPORT_LINK=$(cat)
+    IMPORT_LINK=$(echo "$IMPORT_LINK" | tr -d '[:space:]')
+    if [[ -z "$IMPORT_LINK" ]]; then
+        die "no link provided. Re-run this script when you have your
+        operator's bg:// link ready."
+    fi
+fi
+
 if [[ -n "$IMPORT_LINK" ]]; then
-    say "applying bg:// share-link from operator ..."
+    say "applying bg:// share-link ..."
     # -import-force overrides any pre-existing config without prompting.
     "$BINARY_PATH" -import "$IMPORT_LINK" -import-force -config "$CONFIG_PATH" \
-        || die "applying bg:// link failed. The link may be malformed or
-                truncated — ask your operator to re-issue it."
+        || die "applying bg:// link failed. The link may be malformed
+        or truncated — ask your operator to re-issue it."
 fi
 
 # --------- 8. config sanity check ---------
@@ -154,10 +183,9 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
   WARNING: BeaconGate is installed but has no config yet.
 ==========================================================
 
-  • If you have a bg:// share-link from your operator, re-run with:
-      bash <(curl -fsSL https://raw.githubusercontent.com/${REPO}/master/scripts/termux-install.sh) --import "bg://config?d=..."
-
-  • Or copy a client_config.json into ${CONFIG_PATH} manually.
+Re-run this script and paste your bg:// link when prompted, or run
+explicitly:
+    bash <(curl -fsSL https://raw.githubusercontent.com/${REPO}/master/scripts/termux-install.sh) --import "bg://config?d=..."
 
 The client cannot start without a config. Exiting.
 EOF
