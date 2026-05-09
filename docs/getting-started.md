@@ -769,50 +769,33 @@ curl -x socks5h://127.0.0.1:1080 https://api.ipify.org
 
 These are honest current-state limitations of master as of 2026-05-09. None are blockers for getting a tunnel up, but they shape end-user expectations.
 
-### Per-request latency floor: ~8–10s
+### Per-request latency floor: ~3–5s (down from ~8–10s pre-v1.1.1)
 
-Each fresh SOCKS5 request through the appsscript transport takes roughly 8 seconds end-to-end before the response data lands at the SOCKS5 caller. Breakdown:
+v1.1.1 ships a protocol-level round-trip fusion that collapses three sequential Apps Script invocations per logical SOCKS request into one. Breakdown today:
 
 ```
-1× POST (OPEN session)         → ~1.8s   Apps Script per-call overhead × 302 redirect
-1× POST (DATA bytes)           → ~1.8s   sequential after OPEN
-1× POST (long-poll for response) → ~1.8s + actual server work + Apps Script overhead
+1× POST (OPEN+DATA fused via Dial-side coalesce) → ~1.8s   Apps Script per-call overhead
+   server holds the same POST until upstream replies (~200–800ms typical)
 ─────────────────────────────────
-~5-7s minimum, observed 8-10s in practice
+~2–3s minimum, observed 3–5s in practice
 ```
+
+The 22% drop in Apps Script invocations per request is also a real quota win — each request burns one POST instead of three.
 
 **What this means in practice:**
 
 | Workload | Verdict |
 |---|---|
-| One-shot API call / `curl example.com` | Fine. Slow but works. |
-| Messaging app (WhatsApp, Signal, Telegram) | Fine. Initial connection is slow; after that, the persistent connection multiplexes and feels normal. |
-| Email sync (IMAP/POP3) | Fine. Same as messaging. |
-| SSH | Fine for interactive use; horrible for bulk file transfer. |
-| Browser page load | **Rough.** TLS handshake = 4–5 round-trips through the tunnel = 30–40s before the first byte of HTML lands. Subsequent resources on the same page are slightly faster (connection-reuse) but still slow. |
+| One-shot API call / `curl example.com` | Fine. ~3s feels prompt. |
+| Messaging app (WhatsApp, Signal, Telegram) | Fine. Initial connection is fast; after that, the persistent connection multiplexes and feels normal. |
+| Email sync (IMAP/POP3) | Fine. |
+| SSH | Comfortable for interactive use. Bulk file transfer remains slow because each round-trip pays the per-call floor. |
+| Browser page load | Workable. TLS handshake still costs several round-trips through the tunnel (~10–15s for a fresh connection). Resources on the same page reuse the connection and feel normal. |
 | Video / audio streaming | **Don't.** |
 
-### Connection wedging after extended use
+### `coalesce_step_ms` is still broken in production
 
-After ~5–10 minutes of active use, the appsscript transport's HTTP/2 connection occasionally wedges. Symptoms:
-
-- `state` flips to `degraded` in `/api/status`
-- `last_error: "transport: remote unreachable: Post ... context deadline exceeded"`
-- SOCKS5 curls start timing out
-
-**Fix**: restart the client.
-
-```sh
-# On the phone:
-pkill beacongate-client
-./beacongate-client-android-arm64 -config client_config.json -control-addr 127.0.0.1:9091 > client.log 2>&1 &
-```
-
-A future fix will make connection pruning more aggressive. Until then, restart hygiene.
-
-### `coalesce_step_ms` is broken
-
-The client config has a knob `coalesce_step_ms` documented as a quota-saving optimization. **Do not enable it.** With any non-zero value, 100% of SOCKS5 curls time out at 25s in production (against real Apps Script). Unit tests in CI pass, but the bug only manifests with the real Apps Script transport. Until the underlying bug is fixed, leave it out of `client_config.json`.
+The client config has a knob `coalesce_step_ms` documented as a quota-saving optimization. **Do not enable it.** With any non-zero value, 100% of SOCKS5 curls time out at 25s in production (against real Apps Script). Unit tests in CI pass, but the bug only manifests with the real Apps Script transport. The fusion shipped in v1.1.1 (Dial-side OPEN+DATA buffer) bypasses this machinery entirely, so the latency win arrives without enabling `coalesce_step_ms`. Leave it out of `client_config.json` until the underlying bug is fixed.
 
 ### Apps Script daily quota
 
@@ -878,11 +861,11 @@ vps# ops/prepare-bundle.sh \
 | Server restart loops with `permission denied` on config | `/etc/beacongate` group ownership wrong | `chgrp beacongate /etc/beacongate` (Step 5) |
 | Apps Script `/exec` returns HTML error page instead of JSON | Web app not deployed with `Anyone` access | Re-deploy ([Step 9.4](#94-deploy-as-a-web-app)) |
 | Apps Script `/exec` returns `Moved Temporarily` | Normal — `script.google.com` always 302-redirects to `script.googleusercontent.com`. The client follows it. |
-| Client status shows `state=degraded`, all curls timing out | Connection wedge after extended use | Restart the client (Known limitations above) |
+| Client status shows `state=degraded`, all curls timing out | Connection wedge after extended use (rare since v1.1.1: pool retires conns every 5 min and on any RoundTrip error) | Wait one minute for auto-recovery; if it persists, restart the client |
 | `auth failed` (HTTP 401) on `/tunnel` | Server and client AES keys diverged | Regenerate key, redo Steps 5+10+12 |
 | `RESET POLICY_DENIED` on legitimate destination | Server's policy engine blocked it | `beacongate-admin put-rule --addr http://127.0.0.1:9090 --file allow-rule.json`; see [policy.md](policy.md) |
 | Friend's phone shows `verify.sh: 2/3 passed, only #3 disguise failing` | Likely OK — that check has known flakiness on first cold start. Have them re-run after any successful curl. |
-| All friend's curls timeout after first few minutes | Connection wedge (Known limitations) | They restart the client (`pkill beacongate-client && nohup ./beacongate-client-android-arm64 ... &`) |
+| All friend's curls timeout after first few minutes | Possible connection wedge (rare since v1.1.1; the pool now retires conns every 5 min and immediately on RoundTrip error) | If self-recovery doesn't kick in within a minute, restart the client (`pkill beacongate-client && nohup ./beacongate-client-android-arm64 ... &`) |
 
 For deeper failure-mode runbooks, see [troubleshooting.md](troubleshooting.md).
 

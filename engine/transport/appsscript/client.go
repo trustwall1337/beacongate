@@ -152,6 +152,7 @@ func New(cfg Config) (*Client, error) {
 		clients = &httpClientPool{
 			clients: cfg.HTTPClients,
 			hosts:   []string{"injected"},
+			stopCh:  make(chan struct{}),
 		}
 	} else {
 		clients = newHTTPClientPool(cfg.Fronting, cfg.RequestTimeout)
@@ -250,6 +251,13 @@ func (c *Client) attempt(ctx context.Context, idx int, encodedBody string) ([]by
 		// can recognise long-poll cancellations as expected (not faults).
 		// %v here would drop the chain and every cancelled long-poll
 		// would log as pump.exchange_failed and stall the data path.
+		// On any non-cancellation transport error we also force
+		// closing of idle h2 conns across the pool — the wedged-conn
+		// failure mode (Issue A) recovers on the very next request
+		// rather than waiting for the periodic retirement tick.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			c.clients.retireAll()
+		}
 		return nil, fmt.Errorf("%w: %w", transport.ErrUnreachable, err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
@@ -323,6 +331,9 @@ func (c *Client) Close() error {
 	if cancel != nil {
 		cancel()
 		<-c.quotaDone
+	}
+	if c.clients != nil {
+		c.clients.close()
 	}
 	return nil
 }

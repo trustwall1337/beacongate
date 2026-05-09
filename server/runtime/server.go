@@ -27,6 +27,22 @@ var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 const (
 	defaultDrainWindow = 25 * time.Millisecond
+	// defaultActiveDrainWindow is the server-side hold time for a POST
+	// that carries DATA so the upstream's response can be folded back
+	// into the same POST instead of waiting for the next long-poll.
+	// With Apps Script's ~1.8 s per-call overhead, folding the
+	// response saves a full round-trip per logical SOCKS request:
+	// p50 latency drops from ~3 s to ~1.7 s in the in-process bench
+	// modelling production conditions (per_call=1.5 s, upstream=200 ms).
+	// The wait short-circuits on the per-client signal as soon as
+	// upstream data arrives, so a fast upstream returns immediately;
+	// the 5 s ceiling only fires when upstream is genuinely slow.
+	// OPEN-only and CLOSE-only batches keep the short drainWindow
+	// because they cannot plausibly produce an upstream response in
+	// the same POST. 5 s is well under the 60 s Apps Script doFetch
+	// limit and the 60–100 s common HTTP intermediary idle timeouts,
+	// so no carrier or proxy will sever the connection.
+	defaultActiveDrainWindow = 5 * time.Second
 	// defaultLongPollWindow is the server-side hold time for an idle
 	// long-poll. Matches client/runtime.defaultIdleHold so the two ends
 	// agree on cadence: 8s gives a fast inbound-channel cycle (low
@@ -84,6 +100,7 @@ type Server struct {
 	tunnelLimiter *limit.TokenBucket
 
 	drainWindow          time.Duration
+	activeDrainWindow    time.Duration
 	longPollWindow       time.Duration
 	maxChunk             int
 	maxSessionsPerClient int
@@ -116,6 +133,7 @@ func New(serverID string, sealer *crypto.Sealer, dialer upstream.Dialer, policy 
 		replayStore:          replay.New(replay.Defaults()),
 		tunnelLimiter:        limit.New(defaultTunnelRatePerSec, defaultTunnelBurst),
 		drainWindow:          defaultDrainWindow,
+		activeDrainWindow:    defaultActiveDrainWindow,
 		longPollWindow:       defaultLongPollWindow,
 		maxChunk:             defaultMaxChunk,
 		maxSessionsPerClient: defaultMaxSessionsPerClient,
@@ -148,6 +166,17 @@ func (s *Server) log() *slog.Logger { return s.logger.Load() }
 func (s *Server) SetLongPollWindow(d time.Duration) {
 	s.mu.Lock()
 	s.longPollWindow = d
+	s.mu.Unlock()
+}
+
+// SetActiveDrainWindow overrides the default response-folding window
+// (defaultActiveDrainWindow) used by active POSTs (those carrying
+// OPEN/DATA/CLOSE). Useful for tests that want a tighter bound on
+// test runtime; production should leave the default. Setting d <= 0
+// reverts to the legacy short drainWindow behaviour.
+func (s *Server) SetActiveDrainWindow(d time.Duration) {
+	s.mu.Lock()
+	s.activeDrainWindow = d
 	s.mu.Unlock()
 }
 

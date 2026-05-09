@@ -42,6 +42,27 @@ type FrontingConfig struct {
 	SNIHosts []string
 }
 
+// connRetirementInterval is how often the pool forcibly retires every
+// underlying http2 connection. Long-lived h2 connections to Google's
+// Apps Script edge tend to drift into a half-dead state after ~5–10 min
+// — RoundTrip starts hanging until the request timeout, every curl
+// times out, the pump trips into "degraded", and only a client restart
+// recovers. The exact root cause is in the h2 / Apps Script frontend
+// interaction (the edge may close a conn without a clean GOAWAY); we
+// cannot fix it server-side. Proactively recycling conns every 5
+// minutes bounds how long any one conn carries traffic, so a half-dead
+// conn is replaced before it accumulates enough bad state to wedge.
+// 5 min is well below the observed 5–10 min wedge floor and well above
+// the per-request budget so retirement never interrupts a hot session.
+const connRetirementInterval = 5 * time.Minute
+
+// defaultSNIHosts is the fallback rotation when the operator hasn't
+// configured any. Three Google fronts spread the tunnel's load across
+// independent h2 ClientConns to different Google edge boxes — when one
+// edge wedges, traffic on the other two keeps flowing and round-robin
+// naturally avoids the bad slot once retirement kicks in.
+var defaultSNIHosts = []string{"www.google.com", "mail.google.com", "drive.google.com"}
+
 // httpClientPool holds one *http.Client per configured SNI host, plus
 // round-robin selection state. Each client uses its own uTLS session
 // cache (resumption is bound to SNI server-side).
@@ -50,6 +71,8 @@ type httpClientPool struct {
 	hosts   []string
 	caches  *utlsCacheRegistry
 	next    atomic.Uint64
+
+	stopCh chan struct{}
 }
 
 // newHTTPClientPool constructs the pool. requestTimeout caps every HTTP
@@ -61,7 +84,7 @@ type httpClientPool struct {
 func newHTTPClientPool(cfg FrontingConfig, requestTimeout time.Duration) *httpClientPool {
 	hosts := cfg.SNIHosts
 	if len(hosts) == 0 {
-		hosts = []string{"www.google.com"}
+		hosts = append([]string(nil), defaultSNIHosts...)
 	}
 	caches := newUTLSCacheRegistry()
 	clients := make([]*http.Client, len(hosts))
@@ -72,12 +95,14 @@ func newHTTPClientPool(cfg FrontingConfig, requestTimeout time.Duration) *httpCl
 		clients: clients,
 		hosts:   append([]string(nil), hosts...),
 		caches:  caches,
+		stopCh:  make(chan struct{}),
 	}
 	// Fire prewarm in the background; it is best-effort and consumes no
 	// Apps Script quota (raw TLS handshakes only). On failure the
 	// goroutine returns silently and the first real request pays the
 	// full handshake cost — correct fallback, just slower.
 	go prewarmFrontedClients(cfg.GoogleIP, hosts, caches)
+	go pool.retireLoop()
 	return pool
 }
 
@@ -89,6 +114,59 @@ func (p *httpClientPool) pick() *http.Client {
 	}
 	idx := int(p.next.Add(1)-1) % len(p.clients)
 	return p.clients[idx]
+}
+
+// idleConnCloser is the stdlib idiom for "transport that knows how to
+// drop its idle connections." Both http.Transport and http2.Transport
+// satisfy this. Pool retirement uses this rather than a concrete-type
+// assertion so future transport choices (e.g. custom h2 wrappers in
+// tests) keep working.
+type idleConnCloser interface {
+	CloseIdleConnections()
+}
+
+// retireLoop runs in the background and forcibly closes every
+// underlying h2 idle connection on each client every
+// connRetirementInterval. The next request after retirement re-dials
+// fresh — paying one TLS handshake — but in exchange we never carry a
+// long-lived conn that could drift into the wedged state described in
+// the connRetirementInterval docstring. Stops on close().
+func (p *httpClientPool) retireLoop() {
+	t := time.NewTicker(connRetirementInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-t.C:
+			p.retireAll()
+		}
+	}
+}
+
+// retireAll forces every client's underlying transport to close idle
+// connections immediately. Called from Roundtrip on RoundTrip errors so
+// a wedged conn is replaced on the next request rather than waiting
+// for the next retirement tick.
+func (p *httpClientPool) retireAll() {
+	for _, c := range p.clients {
+		if c == nil {
+			continue
+		}
+		if closer, ok := c.Transport.(idleConnCloser); ok && closer != nil {
+			closer.CloseIdleConnections()
+		}
+	}
+}
+
+// close stops the background retirement loop. Safe to call multiple
+// times.
+func (p *httpClientPool) close() {
+	select {
+	case <-p.stopCh:
+	default:
+		close(p.stopCh)
+	}
 }
 
 // newFrontedClient builds a single *http.Client whose underlying

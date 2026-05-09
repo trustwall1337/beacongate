@@ -32,6 +32,21 @@ const (
 	defaultActiveTimeout = 35 * time.Second
 	defaultInboxCapacity = 64
 	defaultMaxChunk      = 16 * 1024
+
+	// dialFusionDelay is how long Dial buffers an OPEN message before
+	// flushing it on its own. The SOCKS layer almost always issues its
+	// first Write within microseconds of Dial returning, so this short
+	// window lets OPEN and the first DATA frame coalesce into ONE
+	// outbound HTTP POST instead of two — a structural latency win
+	// because each POST through Apps Script costs ~1.8 s, so saving
+	// one round-trip per logical SOCKS request shaves a real second
+	// off end-user latency. The safety timer guarantees OPEN ships
+	// even if the local app never writes (e.g. some FTP-style
+	// protocols wait for a server greeting). 50 ms is below human
+	// perception and small enough that lone-OPEN stalls never feel
+	// laggy. This bypasses the coalesce window machinery entirely so
+	// it is not affected by any operator-configured coalesce_step_ms.
+	dialFusionDelay = 50 * time.Millisecond
 )
 
 // Pump drives a background goroutine that batches outbound session traffic
@@ -262,7 +277,13 @@ func (p *Pump) Dial(target protocol.Target) (*ClientSession, error) {
 		Target:    &target,
 	})
 	p.mu.Unlock()
-	p.signalFlush()
+	// Buffer the OPEN message for dialFusionDelay so the SOCKS
+	// layer's first Write coalesces with it into a single outbound
+	// POST. If no Write arrives within the window, the safety timer
+	// flushes OPEN on its own; if a Write already drained OPEN+DATA
+	// together, signalFlushIfPending is a no-op so we don't waste a
+	// round-trip cancelling an in-flight long-poll.
+	time.AfterFunc(dialFusionDelay, p.signalFlushIfPending)
 	p.rt.Log().Info("session.open",
 		"session_id", id,
 		"target", net.JoinHostPort(target.Host, fmt.Sprintf("%d", target.Port)))
@@ -282,6 +303,21 @@ func (p *Pump) signalFlush() {
 	p.cancelMu.Unlock()
 	if c != nil {
 		c()
+	}
+}
+
+// signalFlushIfPending wakes the pump loop only when the outbox has
+// queued frames. Used by the Dial-side OPEN+DATA fusion safety timer:
+// if a SOCKS Write coalesced OPEN with the first DATA frame and the
+// pump already drained both, the safety timer firing should be a
+// no-op — otherwise it would cancel an in-flight long-poll for no
+// gain and cost an extra Apps Script round-trip.
+func (p *Pump) signalFlushIfPending() {
+	p.mu.Lock()
+	pending := len(p.outbox) > 0
+	p.mu.Unlock()
+	if pending {
+		p.signalFlush()
 	}
 }
 

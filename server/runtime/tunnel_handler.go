@@ -116,16 +116,34 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respMsgs := s.processBatch(r.Context(), env)
-	// Idle batches (probe-only) get the long-poll window so server-originated
-	// data can ship back without waiting for the client's next request.
-	// Active batches keep the short drain window so they return promptly.
-	window := s.drainWindow
+	// Pick the drain window based on the inbound batch shape:
+	//   - Probe-only (idle) batches  → longPollWindow (8s default).
+	//     Server holds for upstream-originated data so a fresh response
+	//     can ship without waiting for the client's next POST.
+	//   - Batches carrying DATA       → activeDrainWindow (5s default).
+	//     Server holds long enough for the upstream's response to fold
+	//     back into the SAME POST that carried the request — saves a
+	//     full Apps Script round-trip per logical SOCKS request. The
+	//     wait short-circuits on the per-client signal as soon as
+	//     upstream data arrives, so a fast upstream returns
+	//     immediately.
+	//   - All other active batches (OPEN-only, CLOSE-only, etc.) →
+	//     short drainWindow (25ms). These do not push upstream bytes
+	//     so there is no plausible same-POST response to wait for;
+	//     the legacy "return promptly" behaviour applies.
 	longPoll := isIdleBatch(env)
-	if longPoll {
-		s.mu.Lock()
+	hasData := hasDataPayload(env)
+	s.mu.Lock()
+	var window time.Duration
+	switch {
+	case longPoll:
 		window = s.longPollWindow
-		s.mu.Unlock()
+	case hasData && s.activeDrainWindow > 0:
+		window = s.activeDrainWindow
+	default:
+		window = s.drainWindow
 	}
+	s.mu.Unlock()
 	respMsgs = append(respMsgs, s.collectUpstreamData(r.Context(), env.ClientID, window)...)
 	if len(respMsgs) == 0 {
 		respMsgs = append(respMsgs, protocol.Message{
@@ -439,6 +457,23 @@ func isIdleBatch(env protocol.Envelope) bool {
 		}
 	}
 	return true
+}
+
+// hasDataPayload reports whether the inbound envelope carries any DATA
+// frame. Only DATA pushes bytes upstream and therefore can plausibly
+// trigger a return-trip response — OPEN, CLOSE, RESET, PING and PROBE
+// do not. The server uses the longer activeDrainWindow only for batches
+// that actually have a chance of producing a response on the same POST,
+// so a CLOSE-only or OPEN-only batch returns promptly instead of
+// stalling the next request behind a 5 s wait that is structurally
+// impossible to satisfy.
+func hasDataPayload(env protocol.Envelope) bool {
+	for _, m := range env.Messages {
+		if m.Type == protocol.MessageTypeData {
+			return true
+		}
+	}
+	return false
 }
 
 // collectUpstreamData drains pending upstream bytes for the given client

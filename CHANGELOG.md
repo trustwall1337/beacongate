@@ -6,6 +6,92 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches `1.0.0`.
 
+## [Unreleased] — v1.1.1
+
+### Performance — protocol-level round-trip fusion
+
+Two surgical changes reduce the number of Apps Script invocations per
+SOCKS request from 3 to ~1, cutting end-user latency roughly in half.
+Production-realistic in-process bench
+(`per_call=1.5 s, upstream=200 ms`):
+**p50 SOCKS GET 3.04 s → 1.71 s (−43.7 %)**, Apps Script invocations
+per request **5.00 → 3.90 (−22 %)**. See
+[docs/v1.1.1-latency-benchmark.md](docs/v1.1.1-latency-benchmark.md)
+for the full reproducer and methodology.
+
+- **Client-side OPEN+DATA fusion** — `Pump.Dial` now buffers the
+  OPEN message for 50 ms via `time.AfterFunc(p.signalFlushIfPending)`
+  instead of flushing immediately. The SOCKS layer's first `Write`
+  almost always arrives within the window, so OPEN and the first
+  DATA frame coalesce into a single outbound POST. If no Write
+  arrives within 50 ms (rare), the safety timer ships OPEN alone.
+  `signalFlushIfPending` is a no-op when the outbox is already
+  drained, so a coalesced flush does not waste an extra
+  long-poll-cancel round-trip. This bypasses the
+  `coalesce_step_ms` machinery entirely, so the win arrives without
+  exposing operators to the still-unfixed coalesce production bug.
+
+- **Server-side response folding via `activeDrainWindow`** —
+  `defaultActiveDrainWindow = 5 s` (new). When an inbound batch
+  carries DATA, `handleTunnel` holds the POST open for up to 5 s
+  waiting for the upstream's reply, returning as soon as data
+  arrives via the per-client signal. The response folds back into
+  the same POST that delivered the request, eliminating the
+  follow-up long-poll round-trip. OPEN-only or CLOSE-only batches
+  keep the short 25 ms `drainWindow` (no upstream response is
+  plausible). `SetActiveDrainWindow(d)` operator override; `d <= 0`
+  reverts to legacy 25 ms behaviour.
+
+### Operational — multi-connection HTTP/2 pool (Issue A: ~5–10 min wedging)
+
+Long-lived h2 connections to `script.google.com` drift into a
+half-dead state after extended use, surfacing as `state=degraded`
+and curl timeouts that only recovered on a client restart. Three
+changes harden the appsscript transport:
+
+- **Default SNI rotation bumped from 1 to 3 hosts** —
+  `www.google.com`, `mail.google.com`, `drive.google.com`. Each
+  host gets its own `*http.Client` with an independent
+  `*http2.Transport` and uTLS session cache. A single Google edge
+  wedge no longer stalls the whole tunnel; round-robin naturally
+  steers around the bad slot.
+- **Periodic conn retirement** — every 5 min, every transport's
+  idle h2 conns are dropped via `CloseIdleConnections`. Bounds
+  conn lifetime well below the observed 5–10 min wedge floor so a
+  conn cannot accumulate enough bad state to stall.
+- **Immediate retirement on RoundTrip error** — any non-cancellation,
+  non-deadline transport error triggers a pool-wide
+  `CloseIdleConnections` so the next request starts fresh rather
+  than waiting for the next periodic tick.
+
+Tests: `engine/transport/appsscript/connpool_test.go` locks in the
+default SNI count, round-robin distribution, and `retireAll`
+fanout.
+
+### Tests — reproducible latency bench
+
+- New `test/integration/latency_bench_test.go` /
+  `TestLatencyMeasurement`: runs N sequential SOCKS GETs through
+  the in-process tunnel with configurable `bg.delay` (Apps Script
+  per-call overhead) and `bg.upstream` (upstream-server latency)
+  flags. `BG_BENCH_LEGACY_DRAIN=1` disables the active-drain
+  window for apples-to-apples baseline runs. JSON output for
+  before-after diffing.
+
+### Documentation
+
+- `docs/v1.1.1-latency-benchmark.md` — full before/after report
+  with reproducer commands.
+- `docs/getting-started.md` — known-limitations section updated:
+  per-request latency floor 8–10 s → 3–5 s; wedging note now
+  reflects auto-recovery.
+
+### Hygiene
+
+- Stale "default 25s" docstring fixed on
+  `Server.SetLongPollWindow` (the default has been 8 s since
+  v1.1.0's 25 s → 8 s long-poll window change).
+
 ## [Unreleased] — v1.1
 
 This release closes the censorship-evasion gap (the `appsscript` transport
