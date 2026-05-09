@@ -17,92 +17,25 @@ const (
 	// defaultIdleHold is how long a probe-only request is allowed to hang at
 	// the server. The server returns early as soon as it has data to ship,
 	// so this is an upper bound on quiet-period wakeups, not a typical wait.
-	// 8s gives a tight inbound-channel cycle: when no data is queued, the
-	// long-poll completes in 8s and the client immediately starts the next
-	// poll, keeping the inbound path "fresh" with low pickup latency for
-	// any newly-arriving response data. Trade-off: more Apps Script
-	// invocations per minute under idle (~3× vs 25s), but well within the
-	// 20K/day per-account quota for typical end-user load. Still below
-	// common HTTP intermediary idle timeouts (Cloudflare 100s, nginx/Caddy
-	// 60s) so no proxy will sever the connection.
-	defaultIdleHold = 8 * time.Second
+	// 25s is below common HTTP intermediary idle timeouts (Cloudflare 100s,
+	// nginx/Caddy 60s) so no proxy will sever the connection.
+	defaultIdleHold = 25 * time.Second
 	// defaultActiveTimeout caps a request that carries real outbound work.
 	// It needs to be larger than defaultIdleHold so a server-side long-poll
 	// has room to complete naturally.
 	defaultActiveTimeout = 35 * time.Second
 	defaultInboxCapacity = 64
 	defaultMaxChunk      = 16 * 1024
-
-	// numWorkers is the size of the pump's worker pool. Each worker runs
-	// an independent loop calling tick(); concurrent ticks let multiple
-	// outbound POSTs and long-polls run in parallel over the underlying
-	// HTTP/2 connection, which is the structural latency win compared to
-	// a single-flight pump. Pattern adopted from GooseRelayVPN's
-	// internal/carrier (workersPerEndpoint=4 in that codebase).
-	numWorkers = 4
-
-	// idleSlotsCap is the maximum number of worker goroutines that may
-	// be in an idle long-poll at the same time. The remaining workers
-	// are either sending outbound POSTs or backed-off-and-sleeping,
-	// ready to wake when signalFlush broadcasts. idleSlotsCap MUST be
-	// less than numWorkers — otherwise no worker would be available to
-	// send freshly-enqueued outbound work without first waiting on some
-	// in-flight long-poll to complete.
-	idleSlotsCap = 2
-
-	// outboundConcurrency is the max number of outbound POSTs (i.e.
-	// POSTs carrying real session messages, not just keepalive probes)
-	// that can be in flight at the same time. Pinned to 1 because the
-	// wire protocol requires per-session message ordering: if OPEN and
-	// DATA for the same session are split across two POSTs and arrive
-	// at the server out of order, the server sees DATA for an unknown
-	// session and resets it ("no such session" RESET). Long-polls run
-	// in parallel — they don't carry session messages, only probes —
-	// which is what gives us the inbound-latency win without breaking
-	// outbound ordering. A future per-session in-flight tracker could
-	// raise this cap.
-	outboundConcurrency = 1
 )
 
-// waker is a broadcast notifier: Broadcast() wakes ALL goroutines
-// currently blocked on C() simultaneously, unlike a buffered chan which
-// only wakes one. Used to wake all idle workers when new outbound work
-// arrives (signalFlush). Pattern adopted from GooseRelayVPN's carrier.
-type waker struct {
-	mu sync.Mutex
-	ch chan struct{}
-}
-
-func newWaker() *waker { return &waker{ch: make(chan struct{})} }
-
-// C returns the current channel to select on. Must be captured BEFORE
-// entering select so a concurrent Broadcast() between drain and wait
-// cannot be missed.
-func (w *waker) C() <-chan struct{} {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.ch
-}
-
-// Broadcast unblocks all goroutines currently waiting on C().
-func (w *waker) Broadcast() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	close(w.ch)
-	w.ch = make(chan struct{})
-}
-
-// Pump drives a pool of background goroutines that batches outbound
-// session traffic and dispatches inbound messages to per-session
-// inboxes. numWorkers concurrent goroutines call tick() independently,
-// so multiple outbound POSTs and idle long-polls can be in flight at
-// the same time over the underlying HTTP/2 connection — that
-// concurrency is what keeps end-user latency low through the
-// Apps Script transport's per-call overhead. idleSlotsCap caps the
-// number of workers that may be in idle long-polls simultaneously, so
-// at least (numWorkers - idleSlotsCap) workers are always available to
-// pick up freshly-enqueued outbound work without waiting for a
-// long-poll to complete.
+// Pump drives a background goroutine that batches outbound session traffic
+// and dispatches inbound messages to per-session inboxes. The HTTP transport
+// is request/response, so the pump uses one in-flight request at a time:
+// when there is outbound work, the request fires immediately; when idle,
+// the request sends a single PROBE that the server holds open ("long-poll")
+// until upstream data is ready or until the hold window expires. Newly
+// enqueued outbound work cancels the in-flight long-poll so user traffic
+// is never blocked behind keepalive.
 type Pump struct {
 	rt       *Runtime
 	idleHold time.Duration
@@ -112,30 +45,12 @@ type Pump struct {
 	sessions map[string]*ClientSession
 	outbox   []protocol.Message
 
+	flush   chan struct{}
 	stop    chan struct{}
 	stopped chan struct{}
 
-	// parentCtx is the root context for all in-flight tick exchanges.
-	// Cancelled in Close() so long-polls return promptly on shutdown.
-	parentCtx    context.Context
-	parentCancel context.CancelFunc
-
-	// wake is broadcast by signalFlush. Workers in idle backoff select
-	// against wake.C() so freshly-enqueued outbound work wakes them
-	// immediately (instead of waiting for backoff to elapse).
-	wake *waker
-
-	// idleSlotMu / idleSlotsInFlight bound how many workers can be in
-	// an idle long-poll concurrently. Workers that try to start a
-	// long-poll when the cap is reached return false from tick() and
-	// back off, leaving them ready to send fresh outbound work.
-	idleSlotMu        sync.Mutex
-	idleSlotsInFlight int
-
-	// outboundSlot is a 1-cap semaphore that serializes outbound POSTs
-	// (POSTs carrying real session messages). See outboundConcurrency
-	// docstring for why per-session ordering requires this.
-	outboundSlot chan struct{}
+	cancelMu       sync.Mutex
+	cancelInFlight context.CancelFunc
 
 	errMu            sync.Mutex
 	lastErr          error
@@ -159,18 +74,14 @@ type Pump struct {
 }
 
 func NewPump(rt *Runtime) *Pump {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &Pump{
-		rt:           rt,
-		idleHold:     defaultIdleHold,
-		inboxCap:     defaultInboxCapacity,
-		sessions:     map[string]*ClientSession{},
-		stop:         make(chan struct{}),
-		stopped:      make(chan struct{}),
-		parentCtx:    ctx,
-		parentCancel: cancel,
-		wake:         newWaker(),
-		outboundSlot: make(chan struct{}, outboundConcurrency),
+		rt:       rt,
+		idleHold: defaultIdleHold,
+		inboxCap: defaultInboxCapacity,
+		sessions: map[string]*ClientSession{},
+		flush:    make(chan struct{}, 1),
+		stop:     make(chan struct{}),
+		stopped:  make(chan struct{}),
 	}
 }
 
@@ -214,12 +125,6 @@ func (p *Pump) Close() error {
 	default:
 		close(p.stop)
 	}
-	// Cancel parent context so any in-flight tick exchange returns
-	// promptly (long-polls don't have to wait their full deadline).
-	p.parentCancel()
-	// Also broadcast wake so any worker sleeping in idleBackoff returns
-	// to its top-of-loop and observes p.stop.
-	p.wake.Broadcast()
 	<-p.stopped
 	p.mu.Lock()
 	live := make([]*ClientSession, 0, len(p.sessions))
@@ -358,52 +263,19 @@ func (p *Pump) Dial(target protocol.Target) (*ClientSession, error) {
 	return s, nil
 }
 
-// signalFlush wakes any worker goroutines that are sleeping in idle
-// backoff so they immediately tick() and pick up newly-enqueued
-// outbound work. With the worker-pool model we don't need to forcibly
-// cancel in-flight long-polls — at least (numWorkers - idleSlotsCap)
-// workers are guaranteed to be available (sending or backed-off) and
-// signalFlush wakes them all simultaneously via the broadcast waker.
+// signalFlush wakes the pump loop, asking it to issue an HTTP request now.
+// It also cancels any in-flight long-poll so newly enqueued outbound work
+// is not blocked behind a keepalive request.
 func (p *Pump) signalFlush() {
-	p.wake.Broadcast()
-}
-
-// acquireIdleSlot tries to reserve one of the idleSlotsCap concurrent
-// idle-long-poll slots. Returns false if all slots are taken; the
-// caller should treat that as "no work this tick, back off".
-func (p *Pump) acquireIdleSlot() bool {
-	p.idleSlotMu.Lock()
-	defer p.idleSlotMu.Unlock()
-	if p.idleSlotsInFlight >= idleSlotsCap {
-		return false
-	}
-	p.idleSlotsInFlight++
-	return true
-}
-
-// releaseIdleSlot is the deferred counterpart to acquireIdleSlot.
-func (p *Pump) releaseIdleSlot() {
-	p.idleSlotMu.Lock()
-	defer p.idleSlotMu.Unlock()
-	p.idleSlotsInFlight--
-}
-
-// idleBackoff returns the sleep duration for a worker that found no
-// work in n consecutive ticks. Short bumps for transient idle, longer
-// bumps when the tunnel is genuinely quiet — the wake channel races
-// against this timer so a kick() from new outbound work cancels the
-// sleep immediately, preserving low end-user latency. Pattern from
-// GooseRelayVPN's idleBackoff.
-func idleBackoff(n int) time.Duration {
-	switch {
-	case n < 3:
-		return 10 * time.Millisecond
-	case n < 10:
-		return 50 * time.Millisecond
-	case n < 30:
-		return 250 * time.Millisecond
+	select {
+	case p.flush <- struct{}{}:
 	default:
-		return time.Second
+	}
+	p.cancelMu.Lock()
+	c := p.cancelInFlight
+	p.cancelMu.Unlock()
+	if c != nil {
+		c()
 	}
 }
 
@@ -474,85 +346,43 @@ func (p *Pump) removeSession(id string) {
 	p.mu.Unlock()
 }
 
-// loop spawns numWorkers concurrent worker goroutines, each running
-// workerLoop. Workers compete for the outbox under p.mu, so multiple
-// outbound POSTs and long-polls can be in flight at the same time over
-// the underlying HTTP/2 connection — the structural concurrency is
-// what keeps end-user latency below the per-call Apps Script overhead.
 func (p *Pump) loop() {
 	defer close(p.stopped)
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			p.workerLoop()
-		}()
-	}
-	wg.Wait()
-}
-
-// workerLoop is one worker goroutine. It calls tick() in a loop;
-// when a tick reports "no work this round" the worker sleeps with
-// adaptive backoff, racing the wake channel so any signalFlush from
-// newly-enqueued outbound work cancels the sleep immediately.
-func (p *Pump) workerLoop() {
-	consecutiveIdle := 0
 	for {
 		select {
 		case <-p.stop:
 			return
 		default:
 		}
-		didWork, err := p.tick()
-		switch {
-		case err != nil:
+		if err := p.tick(); err != nil {
 			p.recordErr(err)
-			consecutiveIdle = 0
-			// Reconnect backoff is shared across workers via the
-			// recordErr-driven state machine; honor it so all
-			// workers slow down together when the transport is in
-			// reconnecting state.
+			// Variable backoff: 200ms while connected/degraded
+			// (existing behaviour); exponential 3s/6s/12s/24s/30s
+			// once we're in "reconnecting" state. The backoff is
+			// recomputed every iteration so a recordSuccess
+			// elsewhere immediately restores fast retry.
 			wait := p.reconnectBackoff()
 			select {
 			case <-p.stop:
 				return
 			case <-time.After(wait):
 			}
-		case didWork:
+		} else {
+			// A successful tick clears the failure counters and
+			// (if we were degraded/reconnecting) emits the
+			// pump.reconnected event.
 			p.recordSuccess()
-			consecutiveIdle = 0
-			// Loop back immediately — there might be more work.
-		default:
-			// Idle: no outbound, idle slot taken, or no sessions.
-			// Capture wake channel BEFORE sleeping so a Broadcast()
-			// fired between the work-check and the sleep is not lost.
-			consecutiveIdle++
-			wakeCh := p.wake.C()
-			select {
-			case <-p.stop:
-				return
-			case <-wakeCh:
-				consecutiveIdle = 0
-			case <-time.After(idleBackoff(consecutiveIdle)):
-			}
 		}
 	}
 }
 
-// tick issues at most one HTTP request from one worker. If outbound
-// work is queued the request carries it. If the queue is empty and
-// there are live sessions, tick may try to start an idle long-poll —
-// gated by acquireIdleSlot so at most idleSlotsCap workers are in idle
-// long-polls concurrently. Returns:
-//
-//   - (true, nil)   work was sent or response received successfully
-//   - (false, nil)  no work this round (no outbound, no idle slot
-//                   available, or no live sessions); caller backs off
-//   - (true, nil)   long-poll completed via expected wake (signalFlush
-//                   cancelled or idleHold deadline fired naturally)
-//   - (false, err)  real transport failure (caller calls recordErr)
-func (p *Pump) tick() (didWork bool, err error) {
+// tick issues exactly one HTTP request. If outbound work is queued the
+// request carries it and uses the active timeout. If the queue is empty
+// and there are live sessions, the request is a long-poll PROBE that lets
+// the server hold open until upstream data is ready. If there are no
+// outbound messages and no sessions, the pump parks on the flush/stop
+// channels — no HTTP traffic is generated.
+func (p *Pump) tick() error {
 	p.mu.Lock()
 	batch := p.outbox
 	p.outbox = nil
@@ -563,21 +393,16 @@ func (p *Pump) tick() (didWork bool, err error) {
 	longPoll := false
 	if len(batch) == 0 {
 		if !hasSessions {
-			// No sessions and no outbound — nothing to do this round.
-			// Worker will back off and wait on wake channel.
-			return false, nil
+			// Truly idle: no live sessions, nothing to keep alive. Park.
+			select {
+			case <-p.flush:
+			case <-p.stop:
+			}
+			return nil
 		}
-		// Limit concurrent idle long-polls. If all idleSlotsCap slots
-		// are taken, this worker backs off so it remains available to
-		// fire freshly-queued outbound work without waiting for some
-		// long-poll to complete first.
-		if !p.acquireIdleSlot() {
-			return false, nil
-		}
-		defer p.releaseIdleSlot()
-		probeID, perr := p.rt.NewID("kp")
-		if perr != nil {
-			return false, perr
+		probeID, err := p.rt.NewID("kp")
+		if err != nil {
+			return err
 		}
 		batch = []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: probeID}}
 		longPoll = true
@@ -589,62 +414,48 @@ func (p *Pump) tick() (didWork bool, err error) {
 		// room to complete on its own before the client gives up.
 		timeout = idleHold + 5*time.Second
 	}
-	// Derive from parentCtx so Pump.Close() (parentCancel) cancels all
-	// in-flight ticks promptly, including idle long-polls.
-	ctx, cancel := context.WithTimeout(p.parentCtx, timeout)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
-	// Outbound POSTs serialize through the 1-cap outboundSlot semaphore
-	// to preserve per-session message ordering on the wire. Without
-	// this gate, two workers could race to POST OPEN and DATA for the
-	// same session — the network may reorder them, and the server
-	// would see DATA-without-OPEN and reset with INVALID_STATE
-	// "no such session". Long-polls (probe-only) skip the gate so
-	// inbound-channel parallelism is preserved.
-	if !longPoll {
-		select {
-		case p.outboundSlot <- struct{}{}:
-		case <-ctx.Done():
-			// Re-queue the batch so the next worker that wins the slot
-			// picks it up. Otherwise the batch would be dropped on
-			// shutdown / context cancellation.
-			p.mu.Lock()
-			p.outbox = append(batch, p.outbox...)
-			p.mu.Unlock()
-			return false, ctx.Err()
-		case <-p.stop:
-			p.mu.Lock()
-			p.outbox = append(batch, p.outbox...)
-			p.mu.Unlock()
-			return false, nil
-		}
-		defer func() { <-p.outboundSlot }()
+	// Register cancel so signalFlush can break us out of the long-poll when
+	// new outbound work arrives. Only do this for long-polls; active
+	// requests carry data and shouldn't be interrupted.
+	if longPoll {
+		p.cancelMu.Lock()
+		p.cancelInFlight = cancel
+		p.cancelMu.Unlock()
 	}
+	defer func() {
+		if longPoll {
+			p.cancelMu.Lock()
+			p.cancelInFlight = nil
+			p.cancelMu.Unlock()
+		}
+		cancel()
+	}()
 
 	resp, err := p.rt.Exchange(ctx, batch)
 	if err != nil {
 		// Both endings are expected for long-polls and should not be
 		// classified as failures by recordErr (whose 3-strike counter
 		// trips state→degraded and starves the data path):
-		//   - context.Canceled:        parent context (Pump.Close) or
-		//                              an upstream cancellation. Treat
-		//                              as completed-not-faulted for
-		//                              long-polls so shutdown is quiet.
+		//   - context.Canceled:        signalFlush cancelled us so the
+		//                              pump can send freshly-queued
+		//                              outbound work in the next tick.
 		//   - context.DeadlineExceeded: the long-poll's own
 		//                              idleHold+5s deadline fired with
 		//                              no upstream data — normal idle
 		//                              roll-over to the next long-poll.
 		if longPoll && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-			return true, nil
+			return nil
 		}
 		p.rt.Log().Warn("pump.exchange_failed",
 			"long_poll", longPoll, "error", err.Error())
-		return false, err
+		return err
 	}
 	for _, m := range resp {
 		p.dispatch(m)
 	}
-	return true, nil
+	return nil
 }
 
 func (p *Pump) dispatch(m protocol.Message) {

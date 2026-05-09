@@ -27,13 +27,7 @@ var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 const (
 	defaultDrainWindow          = 25 * time.Millisecond
-	// defaultLongPollWindow is the server-side hold time for an idle
-	// long-poll. Matches client/runtime.defaultIdleHold so the two ends
-	// agree on cadence: 8s gives a fast inbound-channel cycle (low pickup
-	// latency for response data) at the cost of more Apps Script
-	// invocations under idle. See docstring on defaultIdleHold for the
-	// quota trade-off rationale.
-	defaultLongPollWindow       = 8 * time.Second
+	defaultLongPollWindow       = 25 * time.Second
 	defaultMaxChunk             = 16 * 1024
 	defaultMaxSessionsPerClient = 100
 	defaultIdleSessionTimeout   = 10 * time.Minute
