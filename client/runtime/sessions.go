@@ -34,14 +34,33 @@ const (
 	defaultMaxChunk      = 16 * 1024
 )
 
-// Pump drives a background goroutine that batches outbound session traffic
-// and dispatches inbound messages to per-session inboxes. The HTTP transport
-// is request/response, so the pump uses one in-flight request at a time:
-// when there is outbound work, the request fires immediately; when idle,
-// the request sends a single PROBE that the server holds open ("long-poll")
-// until upstream data is ready or until the hold window expires. Newly
-// enqueued outbound work cancels the in-flight long-poll so user traffic
-// is never blocked behind keepalive.
+// Pump drives the client transport. It splits work between two
+// goroutines:
+//
+//   - The outbound worker fires HTTP POSTs that carry session traffic
+//     (OPEN/DATA/CLOSE/RESET). When the outbox is empty, it parks on
+//     the flush channel — it does NOT issue idle long-polls, so it
+//     can fire a new outbound POST the instant traffic arrives.
+//   - The idle worker keeps a single PROBE long-poll standing at the
+//     server whenever there are live sessions. It is the receive-side
+//     pipe for upstream-originated bytes that arrive *between* outbound
+//     POSTs (e.g. late TLS handshake responses, or any push from the
+//     upstream while the outbound worker is parked).
+//
+// Why split: with one in-flight request, every TLS handshake leg
+// serializes through one Apps Script round-trip (~2 s overhead each)
+// and a non-responsive leg (e.g. TLS 1.3 client Finished) stalls the
+// active-drain ceiling. Two concurrent POSTs let the outbound POST
+// return as soon as its drain window expires — the upstream's eventual
+// reply is picked up by the idle worker's standing long-poll without
+// waiting for the next outbound. See server/runtime: defaultActive
+// DrainWindow comment for the matching server-side rationale.
+//
+// Ordering: the server's drainAllForClient is atomic per-client, so
+// each upstream chunk is delivered exactly once via exactly one POST.
+// Apps Script per-call latency variance can still let two POSTs return
+// out-of-order on the wire — handled by per-session receive-side seq
+// reordering in deliverData.
 type Pump struct {
 	rt       *Runtime
 	idleHold time.Duration
@@ -51,12 +70,31 @@ type Pump struct {
 	sessions map[string]*ClientSession
 	outbox   []protocol.Message
 
-	flush   chan struct{}
-	stop    chan struct{}
-	stopped chan struct{}
+	// flush wakes the outbound worker on new enqueue. flushIdle wakes
+	// the idle worker when the session set transitions empty → non-
+	// empty (it self-perpetuates after that). With one cap-1 channel
+	// per worker, signalFlush can wake both reliably; a single shared
+	// channel would deliver to exactly one waiter and silently strand
+	// the other parked.
+	flush     chan struct{}
+	flushIdle chan struct{}
+	stop      chan struct{}
+	stopped   chan struct{}
 
+	// cancelInFlight gates the outbound worker's currently-blocked
+	// long-poll. Today the outbound worker no longer issues long-polls
+	// (those moved to the idle worker), but the cancel hook is kept so
+	// that any future code path which has the outbound worker waiting
+	// on something interruptible can be unblocked by signalFlush.
 	cancelMu       sync.Mutex
 	cancelInFlight context.CancelFunc
+
+	// idleCancel cancels the idle worker's currently-in-flight long-
+	// poll. Used on Close; not used on signalFlush — the idle worker
+	// is supposed to keep polling regardless of outbound activity, so
+	// kicking it on every flush is wasted Apps Script overhead.
+	idleCancelMu sync.Mutex
+	idleCancel   context.CancelFunc
 
 	errMu            sync.Mutex
 	lastErr          error
@@ -81,13 +119,14 @@ type Pump struct {
 
 func NewPump(rt *Runtime) *Pump {
 	return &Pump{
-		rt:       rt,
-		idleHold: defaultIdleHold,
-		inboxCap: defaultInboxCapacity,
-		sessions: map[string]*ClientSession{},
-		flush:    make(chan struct{}, 1),
-		stop:     make(chan struct{}),
-		stopped:  make(chan struct{}),
+		rt:        rt,
+		idleHold:  defaultIdleHold,
+		inboxCap:  defaultInboxCapacity,
+		sessions:  map[string]*ClientSession{},
+		flush:     make(chan struct{}, 1),
+		flushIdle: make(chan struct{}, 1),
+		stop:      make(chan struct{}),
+		stopped:   make(chan struct{}),
 	}
 }
 
@@ -131,6 +170,13 @@ func (p *Pump) Close() error {
 	default:
 		close(p.stop)
 	}
+	// Cancel any in-flight idle long-poll so its goroutine doesn't
+	// linger waiting for the server's full window.
+	p.idleCancelMu.Lock()
+	if c := p.idleCancel; c != nil {
+		c()
+	}
+	p.idleCancelMu.Unlock()
 	<-p.stopped
 	p.mu.Lock()
 	live := make([]*ClientSession, 0, len(p.sessions))
@@ -280,12 +326,18 @@ func (p *Pump) Dial(target protocol.Target) (*ClientSession, error) {
 	return s, nil
 }
 
-// signalFlush wakes the pump loop, asking it to issue an HTTP request now.
-// It also cancels any in-flight long-poll so newly enqueued outbound work
-// is not blocked behind a keepalive request.
+// signalFlush wakes the outbound worker so a freshly-enqueued frame
+// fires its POST immediately. It also pokes the idle worker — only
+// useful on the empty→non-empty session transition (Dial), but cheap
+// enough to do unconditionally — and cancels any in-flight wait the
+// outbound worker may be blocked on.
 func (p *Pump) signalFlush() {
 	select {
 	case p.flush <- struct{}{}:
+	default:
+	}
+	select {
+	case p.flushIdle <- struct{}{}:
 	default:
 	}
 	p.cancelMu.Lock()
@@ -365,19 +417,32 @@ func (p *Pump) removeSession(id string) {
 
 func (p *Pump) loop() {
 	defer close(p.stopped)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		p.outboundLoop()
+	}()
+	go func() {
+		defer wg.Done()
+		p.idleLoop()
+	}()
+	wg.Wait()
+}
+
+// outboundLoop is the worker that fires HTTP POSTs carrying real
+// session traffic. It parks on the flush/stop channels when the outbox
+// is empty — never issues idle long-polls, so a freshly-enqueued frame
+// fires its POST without waiting for any standing PROBE to return.
+func (p *Pump) outboundLoop() {
 	for {
 		select {
 		case <-p.stop:
 			return
 		default:
 		}
-		if err := p.tick(); err != nil {
+		if err := p.outboundTick(); err != nil {
 			p.recordErr(err)
-			// Variable backoff: 200ms while connected/degraded
-			// (existing behaviour); exponential 3s/6s/12s/24s/30s
-			// once we're in "reconnecting" state. The backoff is
-			// recomputed every iteration so a recordSuccess
-			// elsewhere immediately restores fast retry.
 			wait := p.reconnectBackoff()
 			select {
 			case <-p.stop:
@@ -385,20 +450,137 @@ func (p *Pump) loop() {
 			case <-time.After(wait):
 			}
 		} else {
-			// A successful tick clears the failure counters and
-			// (if we were degraded/reconnecting) emits the
-			// pump.reconnected event.
 			p.recordSuccess()
 		}
 	}
 }
 
-// tick issues exactly one HTTP request. If outbound work is queued the
-// request carries it and uses the active timeout. If the queue is empty
-// and there are live sessions, the request is a long-poll PROBE that lets
-// the server hold open until upstream data is ready. If there are no
-// outbound messages and no sessions, the pump parks on the flush/stop
-// channels — no HTTP traffic is generated.
+// outboundTick fires one POST when the outbox has work, or parks on
+// flush/stop when the outbox is empty. Unlike the legacy single-pump
+// tick, this does NOT fall back to issuing PROBE long-polls — that's
+// the idle worker's job.
+func (p *Pump) outboundTick() error {
+	p.mu.Lock()
+	batch := p.outbox
+	p.outbox = nil
+	p.mu.Unlock()
+
+	if len(batch) == 0 {
+		// Park until the next enqueue or shutdown. We don't care
+		// whether there are live sessions: the idle worker handles
+		// keepalive long-polls; the outbound worker only wakes for
+		// real outbound work.
+		select {
+		case <-p.flush:
+		case <-p.stop:
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultActiveTimeout)
+	defer cancel()
+
+	resp, err := p.rt.Exchange(ctx, batch)
+	if err != nil {
+		p.rt.Log().Warn("pump.exchange_failed",
+			"worker", "outbound", "error", err.Error())
+		return err
+	}
+	for _, m := range resp {
+		p.dispatch(m)
+	}
+	return nil
+}
+
+// idleLoop is the standing-long-poll worker. While there is at least
+// one live session it keeps a single PROBE in flight at the server,
+// short-circuiting on upstream data so late responses (those whose
+// active POST already returned with empty drain) reach the client
+// without waiting for the next outbound POST. When there are no live
+// sessions, it parks on flush/stop and emits no HTTP traffic.
+func (p *Pump) idleLoop() {
+	for {
+		select {
+		case <-p.stop:
+			return
+		default:
+		}
+		if err := p.idleTick(); err != nil {
+			p.recordErr(err)
+			wait := p.reconnectBackoff()
+			select {
+			case <-p.stop:
+				return
+			case <-time.After(wait):
+			}
+		} else {
+			p.recordSuccess()
+		}
+	}
+}
+
+// idleTick issues one PROBE long-poll if there are live sessions, or
+// parks on flush/stop otherwise. It never carries outbound DATA — that
+// stays the outbound worker's responsibility, so frame ordering inside
+// a session is preserved.
+func (p *Pump) idleTick() error {
+	p.mu.Lock()
+	hasSessions := len(p.sessions) > 0
+	idleHold := p.idleHold
+	p.mu.Unlock()
+
+	if !hasSessions {
+		// No live sessions → nothing to keep alive. Park until either
+		// a session is created (signalFlush kicks flushIdle) or
+		// shutdown.
+		select {
+		case <-p.flushIdle:
+		case <-p.stop:
+		}
+		return nil
+	}
+
+	probeID, err := p.rt.NewID("kp")
+	if err != nil {
+		return err
+	}
+	batch := []protocol.Message{{Type: protocol.MessageTypeProbe, ProbeID: probeID}}
+
+	timeout := idleHold + 5*time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	p.idleCancelMu.Lock()
+	p.idleCancel = cancel
+	p.idleCancelMu.Unlock()
+	defer func() {
+		p.idleCancelMu.Lock()
+		p.idleCancel = nil
+		p.idleCancelMu.Unlock()
+		cancel()
+	}()
+
+	resp, err := p.rt.Exchange(ctx, batch)
+	if err != nil {
+		// context.Canceled / DeadlineExceeded are normal long-poll
+		// completions, not transport failures. Surfacing them as
+		// errors would trip the 3-strike degraded-state counter.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		p.rt.Log().Warn("pump.exchange_failed",
+			"worker", "idle", "error", err.Error())
+		return err
+	}
+	for _, m := range resp {
+		p.dispatch(m)
+	}
+	return nil
+}
+
+// tick is preserved for the existing test surface (reconnect_test.go
+// calls it directly). It runs exactly one POST: outbound if the outbox
+// has work, otherwise an idle long-poll if there are live sessions,
+// otherwise parks. The split worker loop above is what production uses;
+// this single-shot variant keeps the legacy test contract working.
 func (p *Pump) tick() error {
 	p.mu.Lock()
 	batch := p.outbox
@@ -410,7 +592,6 @@ func (p *Pump) tick() error {
 	longPoll := false
 	if len(batch) == 0 {
 		if !hasSessions {
-			// Truly idle: no live sessions, nothing to keep alive. Park.
 			select {
 			case <-p.flush:
 			case <-p.stop:
@@ -427,15 +608,10 @@ func (p *Pump) tick() error {
 
 	timeout := defaultActiveTimeout
 	if longPoll {
-		// idleHold + a small slack so the server-side long-poll always has
-		// room to complete on its own before the client gives up.
 		timeout = idleHold + 5*time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
-	// Register cancel so signalFlush can break us out of the long-poll when
-	// new outbound work arrives. Only do this for long-polls; active
-	// requests carry data and shouldn't be interrupted.
 	if longPoll {
 		p.cancelMu.Lock()
 		p.cancelInFlight = cancel
@@ -452,16 +628,6 @@ func (p *Pump) tick() error {
 
 	resp, err := p.rt.Exchange(ctx, batch)
 	if err != nil {
-		// Both endings are expected for long-polls and should not be
-		// classified as failures by recordErr (whose 3-strike counter
-		// trips state→degraded and starves the data path):
-		//   - context.Canceled:        signalFlush cancelled us so the
-		//                              pump can send freshly-queued
-		//                              outbound work in the next tick.
-		//   - context.DeadlineExceeded: the long-poll's own
-		//                              idleHold+5s deadline fired with
-		//                              no upstream data — normal idle
-		//                              roll-over to the next long-poll.
 		if longPoll && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 			return nil
 		}
@@ -478,7 +644,7 @@ func (p *Pump) tick() error {
 func (p *Pump) dispatch(m protocol.Message) {
 	switch m.Type {
 	case protocol.MessageTypeData:
-		p.deliverData(m.SessionID, m.Data, m.Compressed)
+		p.deliverData(m.SessionID, m.Seq, m.Data, m.Compressed)
 	case protocol.MessageTypeClose:
 		p.recvClose(m.SessionID)
 	case protocol.MessageTypeReset:
@@ -488,7 +654,18 @@ func (p *Pump) dispatch(m protocol.Message) {
 	}
 }
 
-func (p *Pump) deliverData(id string, data []byte, compressed bool) {
+// deliverData routes one DATA message from the wire into the session's
+// inbox. With concurrent POSTs (outbound + idle worker) the same
+// upstream byte stream can produce DATA messages that arrive on the
+// HTTP wire in a different order than the server's send-seq order:
+// Apps Script per-call latency variance can let a later POST return
+// before an earlier one. Use seq to reassemble the original order
+// before delivering to the inbox.
+//
+// Legacy server responses without seq populated bypass the reorder
+// buffer (sessions in the legacy single-pump deployment never see
+// out-of-order DATA, so no behaviour change for them).
+func (p *Pump) deliverData(id string, seq *uint64, data []byte, compressed bool) {
 	p.mu.Lock()
 	s := p.sessions[id]
 	p.mu.Unlock()
@@ -501,6 +678,7 @@ func (p *Pump) deliverData(id string, data []byte, compressed bool) {
 		return
 	}
 	s.mu.Unlock()
+
 	if compressed {
 		raw, err := protocol.DecompressData(data)
 		if err != nil {
@@ -509,9 +687,56 @@ func (p *Pump) deliverData(id string, data []byte, compressed bool) {
 		}
 		data = raw
 	}
-	select {
-	case s.inbox <- data:
-	case <-s.closed:
+
+	if seq == nil {
+		// Pre-seq server response or non-data path. Deliver directly.
+		s.deliverInOrder(data)
+		return
+	}
+
+	s.recvMu.Lock()
+	expected := s.nextRecvSeq
+	switch {
+	case *seq < expected:
+		// Duplicate (idempotent retry replay surfaced as a re-delivery,
+		// or a benign re-send across two POSTs). Drop.
+		s.recvMu.Unlock()
+		return
+	case *seq > expected:
+		// Out-of-order arrival: the missing seq is still in flight on
+		// another POST. Buffer this one and wait for the gap to close.
+		// recvBuffer is sized lazily so sessions that never see
+		// out-of-order traffic pay nothing.
+		if s.recvBuffer == nil {
+			s.recvBuffer = make(map[uint64][]byte)
+		}
+		// Keep a defensive copy: the underlying slice may be reused
+		// by the caller (decoder, decompressor) once we return.
+		buf := append([]byte(nil), data...)
+		s.recvBuffer[*seq] = buf
+		s.recvMu.Unlock()
+		return
+	}
+
+	// In-order: deliver this chunk plus any contiguous run already
+	// buffered. Build the ordered list under recvMu, then drop the
+	// lock before pushing into the inbox so a slow consumer cannot
+	// stall a peer thread holding recvMu.
+	ordered := [][]byte{data}
+	s.nextRecvSeq++
+	for {
+		next, ok := s.recvBuffer[s.nextRecvSeq]
+		if !ok {
+			break
+		}
+		ordered = append(ordered, next)
+		delete(s.recvBuffer, s.nextRecvSeq)
+		s.nextRecvSeq++
+	}
+	s.recvMu.Unlock()
+
+	for _, chunk := range ordered {
+		s.deliverInOrder(chunk)
 	}
 }
 
@@ -563,6 +788,26 @@ type ClientSession struct {
 	err          error
 
 	readBuf []byte
+
+	// Receive-side reordering state. With concurrent POSTs (outbound
+	// + idle worker), the server's send-seq order is preserved across
+	// posts but the *HTTP wire return order* is not — Apps Script per-
+	// call latency variance can let a later POST return earlier.
+	// recvMu protects nextRecvSeq + recvBuffer; recvBuffer holds
+	// out-of-order chunks until the missing seq arrives.
+	recvMu      sync.Mutex
+	nextRecvSeq uint64
+	recvBuffer  map[uint64][]byte
+}
+
+// deliverInOrder pushes one chunk into the session's inbox. It is
+// called only after the reorder buffer has produced the chunk in seq
+// order, OR for legacy server responses that don't populate seq.
+func (s *ClientSession) deliverInOrder(data []byte) {
+	select {
+	case s.inbox <- data:
+	case <-s.closed:
+	}
 }
 
 func (s *ClientSession) ID() string { return s.id }

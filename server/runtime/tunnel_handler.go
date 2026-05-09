@@ -120,13 +120,17 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 	//   - Probe-only (idle) batches  → longPollWindow (8s default).
 	//     Server holds for upstream-originated data so a fresh response
 	//     can ship without waiting for the client's next POST.
-	//   - Batches carrying DATA       → activeDrainWindow (5s default).
+	//   - Batches carrying DATA       → activeDrainWindow (1s default).
 	//     Server holds long enough for the upstream's response to fold
 	//     back into the SAME POST that carried the request — saves a
 	//     full Apps Script round-trip per logical SOCKS request. The
 	//     wait short-circuits on the per-client signal as soon as
 	//     upstream data arrives, so a fast upstream returns
-	//     immediately.
+	//     immediately. The 1s ceiling caps the stall on legs that
+	//     produce no upstream response (e.g. TLS 1.3 client Finished);
+	//     late responses (>1s upstream RTT) flow back on the client's
+	//     standing idle long-poll worker without waiting for the next
+	//     active POST.
 	//   - All other active batches (OPEN-only, CLOSE-only, etc.) →
 	//     short drainWindow (25ms). These do not push upstream bytes
 	//     so there is no plausible same-POST response to wait for;

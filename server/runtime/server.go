@@ -34,15 +34,29 @@ const (
 	// response saves a full round-trip per logical SOCKS request:
 	// p50 latency drops from ~3 s to ~1.7 s in the in-process bench
 	// modelling production conditions (per_call=1.5 s, upstream=200 ms).
+	//
 	// The wait short-circuits on the per-client signal as soon as
 	// upstream data arrives, so a fast upstream returns immediately;
-	// the 5 s ceiling only fires when upstream is genuinely slow.
+	// this ceiling only fires when upstream is slow OR — and this is
+	// the case the original 5 s tuning missed — when the leg is
+	// structurally non-responsive. TLS 1.3 client Finished is the
+	// canonical example: curl ships Finished and the upstream sends
+	// nothing back until curl's HTTP request follows. With the old
+	// 5 s ceiling, that leg stalled the full window, adding ~5 s to
+	// every fresh HTTPS handshake (BeaconGate p50=12 s vs Goose
+	// p50=5.75 s on the same VPS). 1 s preserves the fold for
+	// typical upstreams (most internet RTTs land under 500 ms) while
+	// capping the non-responsive-leg penalty at ~1 s. Late upstream
+	// responses (>1 s) flow back on the client's standing idle
+	// long-poll worker (see client/runtime: idleWorker) without
+	// waiting for the next active POST.
+	//
 	// OPEN-only and CLOSE-only batches keep the short drainWindow
 	// because they cannot plausibly produce an upstream response in
-	// the same POST. 5 s is well under the 60 s Apps Script doFetch
+	// the same POST. 1 s is well under the 60 s Apps Script doFetch
 	// limit and the 60–100 s common HTTP intermediary idle timeouts,
 	// so no carrier or proxy will sever the connection.
-	defaultActiveDrainWindow = 5 * time.Second
+	defaultActiveDrainWindow = 1 * time.Second
 	// defaultLongPollWindow is the server-side hold time for an idle
 	// long-poll. Matches client/runtime.defaultIdleHold so the two ends
 	// agree on cadence: 8s gives a fast inbound-channel cycle (low
