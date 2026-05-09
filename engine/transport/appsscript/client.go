@@ -233,7 +233,7 @@ func (c *Client) attempt(ctx context.Context, idx int, encodedBody string) ([]by
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(encodedBody))
 	if err != nil {
-		return nil, fmt.Errorf("%w: build request: %v", transport.ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: build request: %w", transport.ErrInvalidResponse, err)
 	}
 	req.Header.Set("Content-Type", contentTypeText)
 	req.Header.Set("User-Agent", c.userAgent)
@@ -245,7 +245,12 @@ func (c *Client) attempt(ctx context.Context, idx int, encodedBody string) ([]by
 
 	httpResp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", transport.ErrUnreachable, err)
+		// %w on the inner err preserves the error chain so the pump's
+		// errors.Is(err, context.Canceled) check at sessions.go:439
+		// can recognise long-poll cancellations as expected (not faults).
+		// %v here would drop the chain and every cancelled long-poll
+		// would log as pump.exchange_failed and stall the data path.
+		return nil, fmt.Errorf("%w: %w", transport.ErrUnreachable, err)
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
@@ -258,7 +263,7 @@ func (c *Client) attempt(ctx context.Context, idx int, encodedBody string) ([]by
 	c.bumpDailyCount(idx)
 
 	if readErr != nil {
-		return nil, fmt.Errorf("%w: read body: %v", transport.ErrUnreachable, readErr)
+		return nil, fmt.Errorf("%w: read body: %w", transport.ErrUnreachable, readErr)
 	}
 
 	switch {
@@ -288,7 +293,7 @@ func (c *Client) attempt(ctx context.Context, idx int, encodedBody string) ([]by
 	decoded := make([]byte, base64.StdEncoding.DecodedLen(len(trimmed)))
 	n, err := base64.StdEncoding.Decode(decoded, trimmed)
 	if err != nil {
-		return nil, fmt.Errorf("%w: base64 decode: %v", transport.ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: base64 decode: %w", transport.ErrInvalidResponse, err)
 	}
 	return decoded[:n], nil
 }

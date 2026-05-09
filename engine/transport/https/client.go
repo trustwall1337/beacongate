@@ -133,18 +133,23 @@ func (c *Client) Roundtrip(ctx context.Context, batch []byte) ([]byte, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.URL, bytes.NewReader(batch))
 	if err != nil {
-		return nil, fmt.Errorf("%w: build request: %v", transport.ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: build request: %w", transport.ErrInvalidResponse, err)
 	}
 	c.applyHeaders(req)
 	req.Header.Set("Content-Type", contentTypeOpaque)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", transport.ErrUnreachable, err)
+		// %w on the inner err preserves the error chain so the pump's
+		// errors.Is(err, context.Canceled) check at sessions.go:439
+		// can recognise long-poll cancellations as expected (not faults).
+		// %v here would drop the chain and every cancelled long-poll
+		// would log as pump.exchange_failed and stall the data path.
+		return nil, fmt.Errorf("%w: %w", transport.ErrUnreachable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		return nil, fmt.Errorf("%w: read body: %v", transport.ErrUnreachable, readErr)
+		return nil, fmt.Errorf("%w: read body: %w", transport.ErrUnreachable, readErr)
 	}
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:

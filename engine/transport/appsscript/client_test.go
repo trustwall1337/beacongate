@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -295,8 +294,66 @@ func TestRoundtripContextCancel(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error on context timeout")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "context") {
-		t.Logf("got error %v (acceptable as long as it indicates cancel/timeout)", err)
+	// REGRESSION GUARD: the wrapped error MUST satisfy errors.Is for
+	// BOTH transport.ErrUnreachable (so callers can classify it as a
+	// transport-level fault) AND context.DeadlineExceeded (so the
+	// pump's long-poll loop in client/runtime/sessions.go can recognise
+	// expected cancellations and not spam pump.exchange_failed).
+	// Previous code used `fmt.Errorf("%w: %v", ErrUnreachable, err)`
+	// which lost the inner chain — symptoms in the field: tunnel data
+	// path stalling on the second SOCKS request because the long-poll
+	// got logged as a fault and back-pressure built up.
+	if !errors.Is(err, transport.ErrUnreachable) {
+		t.Fatalf("expected errors.Is(err, transport.ErrUnreachable) to be true; got %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected errors.Is(err, context.DeadlineExceeded) to be true; got %v", err)
+	}
+}
+
+// TestRoundtripContextCanceledPreservesChain reproduces the exact
+// production scenario behind Bug #2: the pump's long-poll cancels its
+// context (via signalFlush) when new outbound work arrives. The HTTP
+// client returns context.Canceled, the transport wraps it, and the
+// pump checks `errors.Is(err, context.Canceled)` to know whether to
+// silently drop or log+escalate. Before the %v→%w fix this assertion
+// returned false, every cancelled long-poll logged as a fault, and
+// the data path stalled until the next probe tick.
+func TestRoundtripContextCanceledPreservesChain(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(&fakeAppsScript{upstream: upstream})
+	defer srv.Close()
+	cli, err := New(Config{
+		ScriptKeys:  []string{"A"},
+		ScriptURLs:  []string{srv.URL},
+		HTTPClients: []*http.Client{srv.Client()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel from a goroutine after the request is in-flight.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	_, err = cli.Roundtrip(ctx, []byte("x"))
+	if err == nil {
+		t.Fatalf("expected error on context cancel")
+	}
+	if !errors.Is(err, transport.ErrUnreachable) {
+		t.Fatalf("expected errors.Is(err, transport.ErrUnreachable) to be true; got %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected errors.Is(err, context.Canceled) to be true; got %v", err)
 	}
 }
 
