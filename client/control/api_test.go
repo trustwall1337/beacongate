@@ -213,6 +213,29 @@ func TestValidateEndpoint(t *testing.T) {
 	}
 }
 
+func TestQuotaEndpointForNonAppsScriptTransport(t *testing.T) {
+	rt := makeRuntime(t)
+	defer rt.Close()
+	api := New(rt)
+	req := httptest.NewRequest(http.MethodGet, "/api/quota", nil)
+	req.RemoteAddr = "127.0.0.1:1"
+	rec := httptest.NewRecorder()
+	api.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var resp QuotaResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.AppsScript != nil {
+		t.Errorf("expected AppsScript=nil for fake transport, got %+v", resp.AppsScript)
+	}
+	if resp.Note == "" {
+		t.Errorf("expected explanatory Note for non-appsscript transport")
+	}
+}
+
 func TestValidateEndpointRejectsGet(t *testing.T) {
 	rt := makeRuntime(t)
 	defer rt.Close()

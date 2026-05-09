@@ -59,10 +59,15 @@ func main() {
 	validateOnly := flag.Bool("validate-only", false, "validate the config and exit without starting the runtime; prints {\"ok\":bool,...} to stdout")
 	importLink := flag.String("import", "", "decode a bg:// share-link and write the resulting config to -config (or to the profile path when -profile is set); overwrite is prompted")
 	importLinkForce := flag.Bool("import-force", false, "with -import, skip the overwrite confirmation prompt")
+	statusOnce := flag.Bool("status", false, "connect to a running beacongate-client's -control-addr and print a one-shot status + quota summary, then exit")
 	flag.Parse()
 
 	logger := buildLogger(*logLevel, *logFormat)
 	slog.SetDefault(logger)
+
+	if *statusOnce {
+		os.Exit(runStatus(*controlAddr))
+	}
 
 	// --list-profiles prints the profile names and exits.
 	if *listProfiles {

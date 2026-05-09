@@ -52,8 +52,10 @@ type Pump struct {
 	cancelMu       sync.Mutex
 	cancelInFlight context.CancelFunc
 
-	errMu   sync.Mutex
-	lastErr error
+	errMu            sync.Mutex
+	lastErr          error
+	consecutiveFails int  // reset on every success
+	reconnecting     bool // true while in exponential backoff
 
 	// Coalescing (Workstream G): when coalesceWindow > 0, an enqueue
 	// arms a timer that delays the wake-flush by coalesceWindow.
@@ -144,10 +146,93 @@ func (p *Pump) LastError() error {
 	return p.lastErr
 }
 
+// Reconnect-state thresholds. Tuned conservatively so transient
+// blips (a single timeout, one 5xx) don't surface as a state change
+// to the operator/UI.
+const (
+	// degradedAfterFails: consecutive failures before state moves
+	// from "connected" to "degraded".
+	degradedAfterFails = 3
+	// reconnectingAfterFails: consecutive failures before state
+	// moves from "degraded" to "reconnecting" and the loop slows
+	// to exponential backoff.
+	reconnectingAfterFails = 5
+	// reconnectBaseBackoff: first reconnect attempt waits this long;
+	// each subsequent attempt doubles up to reconnectMaxBackoff.
+	reconnectBaseBackoff = 3 * time.Second
+	reconnectMaxBackoff  = 30 * time.Second
+)
+
 func (p *Pump) recordErr(err error) {
 	p.errMu.Lock()
 	p.lastErr = err
+	p.consecutiveFails++
+	fails := p.consecutiveFails
 	p.errMu.Unlock()
+	p.rt.RecordError(err.Error())
+	switch {
+	case fails == degradedAfterFails:
+		p.rt.SetState(StateDegraded)
+		p.rt.Log().Warn("pump.degraded", "consecutive_failures", fails)
+		p.rt.RecordEvent("warn", "runtime", "degraded",
+			"3 consecutive transport failures",
+			err.Error())
+	case fails == reconnectingAfterFails:
+		p.rt.SetState(StateError) // visible as "error" externally; internal flag below drives backoff
+		p.errMu.Lock()
+		p.reconnecting = true
+		p.errMu.Unlock()
+		p.rt.Log().Warn("pump.reconnecting", "consecutive_failures", fails,
+			"backoff_seconds", reconnectBaseBackoff.Seconds())
+		p.rt.RecordEvent("warn", "runtime", "reconnecting",
+			"5+ consecutive transport failures; entering exponential backoff",
+			err.Error())
+	}
+}
+
+// recordSuccess clears the failure counters and, if we were in
+// degraded/reconnecting state, transitions back to connected and
+// emits a reconnected event so support tooling can see the recovery.
+func (p *Pump) recordSuccess() {
+	p.errMu.Lock()
+	wasReconnecting := p.reconnecting
+	hadFails := p.consecutiveFails > 0
+	p.consecutiveFails = 0
+	p.reconnecting = false
+	p.lastErr = nil
+	p.errMu.Unlock()
+	if wasReconnecting || hadFails {
+		// Only flap state on actual recovery, not on every tick.
+		p.rt.SetState(StateConnected)
+		p.rt.RecordSuccessfulProbe()
+		if wasReconnecting {
+			p.rt.Log().Info("pump.reconnected")
+			p.rt.RecordEvent("info", "runtime", "reconnected",
+				"transport recovered after backoff", "")
+		}
+	}
+}
+
+// reconnectBackoff returns how long the loop should wait before the
+// next tick when in reconnecting state. Exponential up to the max,
+// reset by recordSuccess via consecutive_failures=0.
+func (p *Pump) reconnectBackoff() time.Duration {
+	p.errMu.Lock()
+	fails := p.consecutiveFails
+	p.errMu.Unlock()
+	if fails < reconnectingAfterFails {
+		// Not yet in reconnecting state; use the existing fast retry.
+		return 200 * time.Millisecond
+	}
+	// fails=5 → 3s; 6 → 6s; 7 → 12s; 8 → 24s; 9+ → 30s cap.
+	d := reconnectBaseBackoff
+	for i := reconnectingAfterFails; i < fails && d < reconnectMaxBackoff; i++ {
+		d *= 2
+	}
+	if d > reconnectMaxBackoff {
+		d = reconnectMaxBackoff
+	}
+	return d
 }
 
 // Dial opens a new session against target. The returned ClientSession can be
@@ -271,12 +356,22 @@ func (p *Pump) loop() {
 		}
 		if err := p.tick(); err != nil {
 			p.recordErr(err)
-			// Avoid hot-looping on persistent transport errors.
+			// Variable backoff: 200ms while connected/degraded
+			// (existing behaviour); exponential 3s/6s/12s/24s/30s
+			// once we're in "reconnecting" state. The backoff is
+			// recomputed every iteration so a recordSuccess
+			// elsewhere immediately restores fast retry.
+			wait := p.reconnectBackoff()
 			select {
 			case <-p.stop:
 				return
-			case <-time.After(200 * time.Millisecond):
+			case <-time.After(wait):
 			}
+		} else {
+			// A successful tick clears the failure counters and
+			// (if we were degraded/reconnecting) emits the
+			// pump.reconnected event.
+			p.recordSuccess()
 		}
 	}
 }

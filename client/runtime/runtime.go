@@ -73,6 +73,9 @@ type Runtime struct {
 	statusMu            sync.Mutex
 	lastError           string
 	lastSuccessfulProbe time.Time
+
+	eventMu  sync.Mutex
+	eventRec EventRecorder
 }
 
 // New builds a Runtime from a validated client config and a constructed
@@ -154,6 +157,37 @@ func (r *Runtime) StatusSnapshot() (lastError string, lastSuccessfulProbe time.T
 
 // Config returns the loaded client config. Read-only — do not mutate.
 func (r *Runtime) Config() *config.ClientConfig { return r.cfg }
+
+// Transport returns the underlying transport.ClientTransport.
+// Control-API consumers can type-assert to a concrete transport type
+// to surface transport-specific stats (e.g. *appsscript.Client.Stats()
+// for per-account quota numbers).
+func (r *Runtime) Transport() transport.ClientTransport { return r.transport }
+
+// EventRecorder is the optional callback the control API installs
+// so runtime-side state changes (degraded, reconnecting, reconnected,
+// probe_failed) flow into the events ring buffer surfaced through
+// GET /api/events. Callers without a control API leave the recorder
+// nil; RecordEvent is then a no-op.
+type EventRecorder func(level, component, eventType, summary, detail string)
+
+// SetEventRecorder installs the callback. Pass nil to clear.
+func (r *Runtime) SetEventRecorder(rec EventRecorder) {
+	r.eventMu.Lock()
+	r.eventRec = rec
+	r.eventMu.Unlock()
+}
+
+// RecordEvent dispatches to the installed EventRecorder, or no-ops
+// if none is set. Safe to call from any goroutine.
+func (r *Runtime) RecordEvent(level, component, eventType, summary, detail string) {
+	r.eventMu.Lock()
+	rec := r.eventRec
+	r.eventMu.Unlock()
+	if rec != nil {
+		rec(level, component, eventType, summary, detail)
+	}
+}
 
 // SetLogger installs a structured logger. Pass nil to silence.
 func (r *Runtime) SetLogger(l *slog.Logger) {

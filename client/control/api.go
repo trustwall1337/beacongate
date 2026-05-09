@@ -32,8 +32,21 @@ type API struct {
 }
 
 // New builds a control API with default options (256-entry event ring).
+// The API installs itself as the runtime's event recorder so runtime-
+// side state changes (degraded, reconnecting, reconnected) flow into
+// the ring buffer exposed via GET /api/events.
 func New(rt *runtime.Runtime) *API {
-	return &API{rt: rt, events: NewEventSink(256)}
+	a := &API{rt: rt, events: NewEventSink(256)}
+	rt.SetEventRecorder(func(level, component, eventType, summary, detail string) {
+		a.events.Record(Event{
+			Level:     level,
+			Component: component,
+			Type:      eventType,
+			Summary:   summary,
+			Detail:    detail,
+		})
+	})
+	return a
 }
 
 // Events returns the API's event sink. Runtime callers (the pump,
@@ -49,6 +62,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/api/diagnose", a.handleDiagnose)
 	mux.HandleFunc("/api/events", a.handleEvents)
 	mux.HandleFunc("/api/validate", a.handleValidate)
+	mux.HandleFunc("/api/quota", a.handleQuota)
 	return loopbackOnly(mux)
 }
 
