@@ -89,6 +89,8 @@ plaintext, nor the BeaconGate server's IP. See
 
 ## Quick start
 
+> **First time setting this up?** The terse summary below assumes you already know your way around a VPS. If you're starting from a brand-new server with no idea where to begin, read [**docs/getting-started.md**](docs/getting-started.md) instead — it's a complete zero-to-tunnel walkthrough with every step (rent a Hetzner VPS → SSH → install Go → build → server config → firewall on both layers → Apps Script deployment → operator dry-run → Android bundle → end-user phone setup), every gotcha I've hit in the field, and an honest "known limitations" section before you ship to a real user.
+
 ### Server side (your VPS, outside the censored network)
 
 ```sh
@@ -421,11 +423,12 @@ make ci              # everything CI runs
 
 ## Documentation
 
+- 👉 **[docs/getting-started.md](docs/getting-started.md)** — *start here if it's your first time*: complete zero-to-tunnel walkthrough from a fresh VPS to your friend's phone, with every gotcha and honest known-limitations.
 - [docs/architecture.md](docs/architecture.md) — system overview, glossary, diagrams
 - [docs/protocol.md](docs/protocol.md) — wire protocol v1.1
 - [docs/admin-api.md](docs/admin-api.md) — admin API surface
 - [docs/policy.md](docs/policy.md) — policy model, rule operations, audit
-- [docs/deployment.md](docs/deployment.md) — full operator deployment guide
+- [docs/deployment.md](docs/deployment.md) — terse two-playbook deployment reference (`https` and `appsscript`)
 - [docs/troubleshooting.md](docs/troubleshooting.md) — failure-mode runbook
 - [docs/operator-handoff-checklist.md](docs/operator-handoff-checklist.md) — pre-handoff verification
 - [docs/android-termux.md](docs/android-termux.md) — end-user setup on Android (Termux + NekoBox)
