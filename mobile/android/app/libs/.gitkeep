@@ -1,0 +1,4 @@
+# app/libs/ holds the gomobile-produced beacongate.aar at build time.
+# The .aar itself is gitignored (see ../.gitignore); this .gitkeep
+# preserves the directory in source control so the Gradle build's
+# `fileTree("libs")` resolver doesn't fail on a fresh clone.

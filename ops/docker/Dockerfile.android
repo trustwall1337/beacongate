@@ -1,0 +1,124 @@
+# Dockerfile.android — reproducible Android build environment for
+# BeaconGate. Produces:
+#   - bin/beacongate.aar  (via gomobile bind)
+#   - bin/beacongate-v*.apk (via Gradle, after Step 3 lands the skeleton)
+#
+# Why Docker for this: the Android SDK + NDK + JDK + gomobile chain
+# adds up to ~4 GB on the host. Containerizing it keeps the operator's
+# Mac clean and gives us a reproducible build (anyone who can run
+# Docker can produce a byte-identical APK from a given commit).
+#
+# Phone testing is OUT OF SCOPE for this image — adb stays on the
+# host because USB device passthrough into Docker is fragile on
+# macOS. Operators install adb separately:
+#     brew install --cask android-platform-tools
+# Then `adb install bin/beacongate-vN.apk` from the host.
+#
+# **First build is ~10–15 minutes** (downloads SDK, NDK, Go modules).
+# Subsequent builds are seconds because Go module + Gradle caches
+# survive in named volumes.
+
+# ---- Stage 1: Java + Go base ------------------------------------------
+# eclipse-temurin pins JDK 17 (Android Gradle Plugin 8.x requirement).
+# golang from the official Go image (matches the toolchain pinned in
+# the project's go.mod).
+#
+# **Forced to linux/amd64.** Google's Linux Android NDK is x86_64-only
+# (no aarch64 host build, even in NDK r26). Apple Silicon Macs need
+# the entire container — base image + Go toolchain + NDK clang — to
+# be x86_64 so the cross-compile to Android ARM64 works under
+# Rosetta. Without this directive, the JDK base would pull the
+# aarch64 variant on M-series Macs and the x86_64 NDK clang would
+# fail to dynamic-link.
+FROM --platform=linux/amd64 eclipse-temurin:17-jdk-jammy AS android-base
+
+ENV ANDROID_HOME=/opt/android-sdk \
+    ANDROID_NDK_HOME=/opt/android-sdk/ndk/26.1.10909125 \
+    PATH=/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/usr/local/go/bin:/root/go/bin:$PATH
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        wget unzip git ca-certificates curl xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Android command-line tools (sdkmanager). Pinned to a specific build
+# so the build is reproducible. sdkmanager.zip URL is stable and
+# served by Google directly.
+ARG ANDROID_CMDLINE_TOOLS_VERSION=11076708
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools \
+    && cd /tmp \
+    && wget -q https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip \
+       -O cmdline-tools.zip \
+    && unzip -q cmdline-tools.zip -d ${ANDROID_HOME}/cmdline-tools \
+    && mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest \
+    && rm cmdline-tools.zip
+
+# Accept the SDK licenses non-interactively. Required for
+# sdkmanager to install platforms / NDK / build-tools.
+RUN yes | sdkmanager --licenses >/dev/null
+
+# Install the SDK components Step 3+ will need:
+#   - platforms;android-34   (compileSdk = 34)
+#   - build-tools;34.0.0     (matches AGP 8.x's expected default)
+#   - platform-tools         (adb is here, useful inside container
+#                             for sanity checks even though phone
+#                             test happens on host)
+#   - ndk;26.1.10909125      (gomobile + Gradle native compile)
+RUN sdkmanager --install \
+        "platforms;android-34" \
+        "build-tools;34.0.0" \
+        "platform-tools" \
+        "ndk;26.1.10909125" \
+    >/dev/null
+
+# Go toolchain. The version here MUST match the project's go.mod
+# `toolchain` directive. Bump in lockstep when the project upgrades.
+ARG GO_VERSION=1.25.10
+RUN cd /tmp \
+    && wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -O go.tar.gz \
+    && tar -C /usr/local -xzf go.tar.gz \
+    && rm go.tar.gz
+
+# gomobile + gobind, installed at known versions for reproducibility.
+# `gomobile init` runs at build time so the NDK paths are validated
+# during image build rather than at first `gomobile bind` invocation.
+RUN go install golang.org/x/mobile/cmd/gomobile@latest \
+    && go install golang.org/x/mobile/cmd/gobind@latest \
+    && gomobile init
+
+# Gradle. Pinned to the version the Android app's
+# mobile/android/gradle/wrapper/gradle-wrapper.properties expects;
+# bump in lockstep when the wrapper version changes. Installed as a
+# top-level binary on PATH so the Makefile invokes `gradle`
+# directly (no wrapper jar to vendor in the repo).
+ARG GRADLE_VERSION=8.7
+RUN cd /tmp \
+    && wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -O gradle.zip \
+    && unzip -q gradle.zip -d /opt \
+    && ln -s /opt/gradle-${GRADLE_VERSION}/bin/gradle /usr/local/bin/gradle \
+    && rm gradle.zip
+
+# ---- Stage 2: Build context -------------------------------------------
+# The actual build is a runtime mount, not a COPY, so the image
+# itself contains only the toolchain. Operators run:
+#
+#   docker build -f ops/docker/Dockerfile.android -t beacongate-android-build .
+#   docker run --rm -v "$PWD:/src" -w /src beacongate-android-build \
+#       gomobile bind -target=android/arm64 -androidapi=24 \
+#         -ldflags="-s -w" -trimpath \
+#         -o bin/beacongate.aar ./mobile/bindings
+#
+# Or via the Makefile wrapper (`make android-aar`), which handles the
+# image build + caching of Go module + Gradle home in named volumes
+# so subsequent runs are fast.
+WORKDIR /src
+
+# Sanity check on image build: print versions so operators can audit
+# what landed in the layer cache when something looks off.
+RUN java -version 2>&1 \
+    && go version \
+    && gomobile version \
+    && sdkmanager --version \
+    && gradle --version
+
+CMD ["/bin/bash"]

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AndroidManifest for the BeaconGate Android client.
+
+  Step 3 (Gradle skeleton) declares the bare minimum: a single launcher
+  Activity. Permissions for VpnService, foreground service, and notifications
+  land in Step 7 alongside the BeaconVpnService implementation; landing them
+  early would make the manifest claim capabilities the app cannot yet honor.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Permission to fetch the Drive-hosted .bg config. The same
+         permission is reused by the tunnel transport in Step 7. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.BeaconGate"
+        tools:targetApi="34"
+        xmlns:tools="http://schemas.android.com/tools">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

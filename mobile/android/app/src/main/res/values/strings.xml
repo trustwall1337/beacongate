@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BeaconGate</string>
+
+    <string name="version_line">Version %1$s</string>
+
+    <!-- Import section -->
+    <string name="import_section_title">Import your config</string>
+    <string name="import_treat_as_password">Your friend\'s link is a key. Don\'t share it.</string>
+    <string name="drive_link_hint">Paste Google Drive link</string>
+    <string name="fetch_drive_button">Fetch from Drive</string>
+    <string name="or_pick_file">Or pick a .bg file you saved:</string>
+    <string name="pick_file_button">Pick from files</string>
+
+    <!-- Status section -->
+    <string name="status_label">Status</string>
+    <string name="status_idle">Ready</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_vpn_consent">Awaiting VPN permission…</string>
+    <string name="status_failed">Disconnected</string>
+    <string name="status_importing">Importing…</string>
+    <string name="friend_line">Imported: %1$s</string>
+    <string name="connect_button">Connect</string>
+    <string name="disconnect_button">Disconnect</string>
+    <string name="connecting_button">Connecting…</string>
+    <string name="reimport_button">Use a different config</string>
+
+    <!-- Error banner -->
+    <string name="error_banner_title">Something went wrong</string>
+    <string name="dismiss_button">Dismiss</string>
+
+    <!-- File picker -->
+    <string name="pick_file_title">Pick the .bg config from your friend</string>
+</resources>

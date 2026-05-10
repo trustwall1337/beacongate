@@ -1,3 +1,7 @@
+// it is the BeaconGate AEAD-envelope wrapper imported as
+// engine/crypto. Renaming would touch every consumer.
+//
+//nolint:revive // var-naming: package shadows stdlib "crypto" by design;
 package crypto
 
 import "testing"

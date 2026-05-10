@@ -3,6 +3,9 @@ dist/
 .DS_Store
 coverage.out
 
+# Claude Code runtime workspace (lock files, scheduled-task state, etc.)
+.claude/
+
 # Personal/internal planning kept out of the public repo.
 docs/planning/
 docs/.archive/

@@ -1,0 +1,18 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+local.properties
+
+# Vendored AAR — produced by `make android-aar`, never committed to
+# the repo. The build system regenerates it from mobile/bindings on
+# every release.
+app/libs/*.aar
+
+# IDE files
+.idea/
+*.iml
+.DS_Store
+
+# Kotlin / Java
+*.class
+hs_err_pid*

@@ -38,7 +38,14 @@ help:
 	@echo ""
 	@echo "Future subtree targets (no-ops until the subtree exists):"
 	@echo "  make desktop-build, desktop-test"
-	@echo "  make mobile-build, mobile-test"
+	@echo ""
+	@echo "Mobile (Android, native app — Docker-driven build, phone via host adb):"
+	@echo "  make mobile-build         - alias for android-aar"
+	@echo "  make mobile-test          - go test ./mobile/..."
+	@echo "  make android-build-image  - build the Android build Docker image (~10 min first run)"
+	@echo "  make android-aar          - produce bin/beacongate.aar via gomobile bind (Docker)"
+	@echo "  make android-apk          - produce a release APK via Gradle (Docker; requires mobile/android/ skeleton)"
+	@echo "  make android-clean        - drop Docker build caches (Go module + Gradle)"
 	@echo ""
 	@echo "Docker (server only):"
 	@echo "  make docker-up      - bootstrap config + build + start (one-shot)"
@@ -63,6 +70,93 @@ go-build-android:
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 	  $(GO) build -trimpath -ldflags="-s -w" \
 	  -o $(BIN)/beacongate-client-android-arm64 ./cmd/beacongate-client
+
+# android-build-image builds the Docker image that contains the
+# Android SDK + NDK + JDK 17 + gomobile + the matching Go toolchain.
+# First build is ~10–15 minutes (downloads ~3 GB); subsequent builds
+# are cached and complete in seconds.
+#
+# Operators only need Docker installed on their machine — no local
+# Android SDK / NDK / JDK.
+android-build-image:
+	docker build \
+	  --platform linux/amd64 \
+	  -f ops/docker/Dockerfile.android \
+	  -t beacongate-android-build:latest \
+	  ops/docker
+
+# android-aar produces the Android Archive (.aar) that the native
+# Android app links against. Wraps mobile/bindings (the gomobile-clean
+# facade over the existing Go client) into a Java/Kotlin-callable
+# library. arm64-only — covers every Android phone made since ~2017
+# and is the only ABI we ship in the production APK (per the v1
+# size-budget plan; armeabi-v7a + x86_64 add ~9 MB combined).
+#
+# Runs gomobile bind inside the beacongate-android-build container
+# so no local Android SDK / NDK / JDK is required. The host's
+# `bin/` directory is bind-mounted as the output sink.
+#
+# Caches:
+#   - bg-android-go-mod : Go module download cache (survives
+#     image rebuilds, not build-context changes)
+#   - bg-android-go-build : gomobile's intermediate Go object cache
+#
+# -ldflags="-s -w" + -trimpath strip debug symbols and absolute paths
+# from the embedded Go runtime, which materially reduces the .aar
+# size (target: < 13 MB; final APK target: < 20 MB).
+android-aar: android-build-image
+	mkdir -p $(BIN)
+	docker run --rm \
+	  --platform linux/amd64 \
+	  -v "$(CURDIR):/src" \
+	  -v bg-android-go-mod:/root/go/pkg/mod \
+	  -v bg-android-go-build:/root/.cache/go-build \
+	  -w /src \
+	  beacongate-android-build:latest \
+	  gomobile bind \
+	    -target=android/arm64 \
+	    -androidapi=24 \
+	    -ldflags="-s -w" \
+	    -trimpath \
+	    -o bin/beacongate.aar \
+	    ./mobile/bindings
+	@echo
+	@echo "Built $(BIN)/beacongate.aar"
+	@du -h $(BIN)/beacongate.aar
+	@# Place a copy under the Gradle module's libs/ directory so
+	@# `make android-apk` (and Android Studio) can resolve the
+	@# `fileTree("libs")` dependency without an extra step.
+	@if [ -d mobile/android/app ]; then \
+	  mkdir -p mobile/android/app/libs && \
+	  cp $(BIN)/beacongate.aar mobile/android/app/libs/beacongate.aar && \
+	  echo "Mirrored to mobile/android/app/libs/beacongate.aar"; \
+	fi
+
+# android-apk builds the release APK via Gradle inside the Docker
+# image. Runs after `android-aar` produces the AAR the Gradle
+# project links. No-op until Step 3 of the Android plan lands the
+# Gradle skeleton under mobile/android/.
+android-apk: android-aar
+	@if [ ! -f mobile/android/settings.gradle.kts ]; then \
+		echo "mobile/android/ has no Gradle project yet (Step 3 not done)."; \
+		exit 0; \
+	fi
+	docker run --rm \
+	  --platform linux/amd64 \
+	  -v "$(CURDIR):/src" \
+	  -v bg-android-gradle:/root/.gradle \
+	  -w /src/mobile/android \
+	  beacongate-android-build:latest \
+	  gradle :app:assembleRelease --no-daemon
+	@echo
+	@echo "Find the APK under mobile/android/app/build/outputs/apk/release/"
+	@find mobile/android/app/build/outputs/apk/release -name '*.apk' -exec du -h {} \;
+
+# android-clean removes Docker volumes used for caching the Android
+# build. Use when the build state seems wedged or after a major
+# Gradle / SDK upgrade.
+android-clean:
+	-docker volume rm bg-android-go-mod bg-android-go-build bg-android-gradle
 
 go-test:
 	@if ! find . -name '*.go' -not -path './vendor/*' -print -quit | grep -q .; then \
@@ -119,13 +213,18 @@ desktop-test:
 		echo "desktop/ has no implementation yet (Phase 3)"; \
 	fi
 
-# --- Mobile subtree (placeholder) --------------------------------------
+# --- Mobile subtree ----------------------------------------------------
 
-mobile-build:
-	@echo "mobile/ has no implementation yet (Phase 4)"
+# mobile-build delegates to android-aar (the gomobile artifact). When
+# the Gradle Android project lands under mobile/android/, this target
+# will additionally invoke `./gradlew :app:assembleRelease`.
+mobile-build: android-aar
 
+# mobile-test runs the Go-side mobile/bindings unit tests. The
+# Kotlin-side tests live under mobile/android/app/src/test/ and are
+# driven by Gradle (`./gradlew test`); CI invokes both in sequence.
 mobile-test:
-	@echo "mobile/ has no implementation yet (Phase 4)"
+	$(GO) test ./mobile/...
 
 # --- Aggregate aliases --------------------------------------------------
 

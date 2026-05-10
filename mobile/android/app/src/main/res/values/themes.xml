@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Material3 DayNight base. DayNight automatically picks the
+         dark variant on devices with system dark theme enabled —
+         saving us a Theme.Beacon.Dark file for now. -->
+    <style name="Theme.BeaconGate" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- v1 keeps the default Material3 palette. Custom colors
+             land alongside the real UI in Step 6 when the design is
+             worth pinning. -->
+        <item name="android:statusBarColor" tools:targetApi="m">@android:color/transparent</item>
+    </style>
+
+</resources>
