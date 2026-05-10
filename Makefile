@@ -44,7 +44,8 @@ help:
 	@echo "  make mobile-test          - go test ./mobile/..."
 	@echo "  make android-build-image  - build the Android build Docker image (~10 min first run)"
 	@echo "  make android-aar          - produce bin/beacongate.aar via gomobile bind (Docker)"
-	@echo "  make android-apk          - produce a release APK via Gradle (Docker; requires mobile/android/ skeleton)"
+	@echo "  make android-apk          - produce a release APK via Gradle (Docker; unsigned, ~15 MB)"
+	@echo "  make android-apk-debug    - produce a debug-signed APK installable via 'adb install' (Docker; ~20 MB)"
 	@echo "  make android-clean        - drop Docker build caches (Go module + Gradle)"
 	@echo ""
 	@echo "Docker (server only):"
@@ -131,6 +132,27 @@ android-aar: android-build-image
 	  cp $(BIN)/beacongate.aar mobile/android/app/libs/beacongate.aar && \
 	  echo "Mirrored to mobile/android/app/libs/beacongate.aar"; \
 	fi
+
+# android-apk-debug builds an installable debug-signed APK. Use this
+# for on-device testing — the release APK (`android-apk`) is
+# unsigned and cannot be installed without a release keystore.
+# Output is ~20 MB (debug APKs include symbols + skip R8); the
+# release path produces ~15 MB.
+android-apk-debug: android-aar
+	@if [ ! -f mobile/android/settings.gradle.kts ]; then \
+		echo "mobile/android/ has no Gradle project yet (Step 3 not done)."; \
+		exit 0; \
+	fi
+	docker run --rm \
+	  --platform linux/amd64 \
+	  -v "$(CURDIR):/src" \
+	  -v bg-android-gradle:/root/.gradle \
+	  -w /src/mobile/android \
+	  beacongate-android-build:latest \
+	  gradle :app:assembleDebug --no-daemon
+	@echo
+	@echo "Debug APK (installable via 'adb install'):"
+	@find mobile/android/app/build/outputs/apk/debug -name '*.apk' -exec du -h {} \;
 
 # android-apk builds the release APK via Gradle inside the Docker
 # image. Runs after `android-aar` produces the AAR the Gradle

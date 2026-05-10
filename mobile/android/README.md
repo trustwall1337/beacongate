@@ -31,16 +31,81 @@ only Docker. Phone testing uses the host's `adb`.
 make android-build-image
 
 # Each iteration:
-make android-aar     # produces bin/beacongate.aar  (via gomobile bind)
-make android-apk     # produces a release APK       (via Gradle)
-
-# Install on a phone connected via USB (adb installed on host):
-adb install mobile/android/app/build/outputs/apk/release/app-arm64-v8a-release.apk
+make android-aar         # produces bin/beacongate.aar     (via gomobile bind)
+make android-apk         # produces a release APK (~15 MB, unsigned)
+make android-apk-debug   # produces a debug-signed APK (~20 MB, installable)
 ```
 
 `make android-clean` drops the Docker volumes used as the Go module +
 Gradle home cache. Only needed if a build wedges or after a major
 toolchain bump.
+
+## First-friend install (Step 10 of the plan)
+
+For the operator's first end-to-end test on a real phone:
+
+### One-time host setup
+
+```sh
+brew install --cask android-platform-tools   # gives you adb
+```
+
+Plug the phone in via USB. On the phone:
+1. Settings → About → tap "Build number" 7 times → enables Developer Options.
+2. Settings → System → Developer Options → enable **USB debugging**.
+3. Plug in; accept the "Allow USB debugging?" dialog.
+
+```sh
+adb devices    # confirm the phone is listed
+```
+
+### Generate a per-friend config on the VPS
+
+```sh
+ssh beacongate-vps "cd /etc/beacongate && \
+  beacongate-admin add-client \
+    --server-config server_config.json \
+    --name yourname \
+    --output yourname.bg && \
+  systemctl restart beacongate-server.service"
+ssh beacongate-vps "cat /etc/beacongate/yourname.bg" > /tmp/yourname.bg
+```
+
+Note: `add-client` requires a `client_template` block in the server
+config. If absent, the CLI's error message tells you exactly what to
+add to `/etc/beacongate/server_config.json`.
+
+### Build, install, and import
+
+```sh
+make android-apk-debug
+adb install -r mobile/android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+```
+
+Open BeaconGate on the phone. Two paths to import:
+- **Drive link**: upload `yourname.bg` to Drive (set "Anyone with the
+  link can view"), copy the share URL, paste in the app, tap
+  "Fetch from Drive".
+- **File picker**: copy `yourname.bg` to the phone's Downloads via
+  USB or Drive, tap "Pick from files", select it.
+
+### Verify the connection
+
+1. Tap **Connect**. Accept the system VPN dialog.
+2. Wait for status to flip from "Connecting…" to "Connected".
+3. On the phone, open Chrome and visit `https://api.ipify.org/`.
+   The IP shown should be **91.98.140.78** (the VPS).
+4. Visit a domain that's filtered in Iran (e.g. `github.com`). It
+   should load — if it does, the tunnel is working end-to-end.
+
+### Inspecting on the server
+
+While the phone is connected:
+```sh
+ssh beacongate-vps "journalctl -u beacongate-server -f | grep yourname"
+```
+Should show `session.open` lines for your client_id, no
+`tunnel.auth_failed` entries.
 
 ## Local development (optional)
 
