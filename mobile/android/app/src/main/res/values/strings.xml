@@ -32,4 +32,8 @@
 
     <!-- File picker -->
     <string name="pick_file_title">Pick the .bg config from your friend</string>
+
+    <!-- Foreground service notification -->
+    <string name="notification_channel_name">BeaconGate VPN</string>
+    <string name="notification_running">Connected. Tap to open BeaconGate.</string>
 </resources>

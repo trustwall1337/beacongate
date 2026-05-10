@@ -1,8 +1,12 @@
 package com.beacongate
 
+import android.app.Application
 import android.content.ContentResolver
+import android.content.Intent
 import android.net.Uri
-import androidx.lifecycle.ViewModel
+import android.os.Build
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,33 +16,29 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Owns the [ConnectionState] for the single-screen UI.
+ * Owns the [ConnectionState] for the single-screen UI. Reconciles
+ * the UI state with the live tunnel state from
+ * [TunnelStateRepository], so the activity never has to bind to the
+ * service.
  *
- * **Why a ViewModel.** Activity recreations (rotation, dark-mode
- * switches, low-memory recycle) destroy the Activity. Holding the
- * state in a ViewModel preserves it across recreations without
- * persisting to disk — exactly the right scope.
+ * **Why an AndroidViewModel.** We need a [Context] to start/stop
+ * [BeaconVpnService] and to construct the credential store; the
+ * `Application` context is the longest-lived non-leaky context
+ * available, exactly what AndroidViewModel provides.
  *
- * **What this class does NOT own.** The actual VPN service lifetime
- * (BeaconVpnService) and the JNI bridge to the Go runtime
- * (Bindings.startTunnel etc.) live in the foreground service.
- * MainViewModel only:
- *   - Reads / writes the credential store.
+ * **What this class does NOT own.** The actual VpnService and the
+ * gomobile JNI bridge to the Go runtime live in [BeaconVpnService]
+ * (the foreground service). This view model only:
+ *   - Reads / writes [CredentialStore].
  *   - Runs the import flow off the main thread.
- *   - Tracks UI state (`StateFlow<ConnectionState>`).
- *   - Asks the Activity to dispatch the VPN-consent intent at the
- *     right moment (via [vpnConsentRequest]).
- *
- * Step 6 (this commit) does NOT yet wire the service-bound state
- * polling — that's part of Step 7. Today's surface is enough for
- * the import flow + the UI state-machine plumbing; the Connect
- * button transitions through Connecting → Failed with a
- * "Step 7 pending" reason so the failure-state branch is exercised
- * end-to-end before VpnService lands.
+ *   - Sends start/stop intents to [BeaconVpnService].
+ *   - Mirrors [TunnelStateRepository.state] into the UI's
+ *     [ConnectionState] so the single screen renders correctly.
  */
 class MainViewModel(
-    private val store: CredentialStore,
-) : ViewModel() {
+    application: Application,
+    private val store: CredentialStore = CredentialStore(application.applicationContext),
+) : AndroidViewModel(application) {
 
     private val _state: MutableStateFlow<ConnectionState> = MutableStateFlow(initialState())
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -52,7 +52,18 @@ class MainViewModel(
     private val _vpnConsentRequest = MutableStateFlow(false)
     val vpnConsentRequest: StateFlow<Boolean> = _vpnConsentRequest.asStateFlow()
 
-    /** Initial state at ViewModel construction time. */
+    init {
+        // Mirror the service's tunnel state onto the UI state. The
+        // ViewModel scope outlives every Activity; this stays
+        // active for the process lifetime.
+        viewModelScope.launch {
+            TunnelStateRepository.state.collect { tunnel ->
+                applyTunnelState(tunnel)
+            }
+        }
+    }
+
+    /** Initial UI state at ViewModel construction time. */
     private fun initialState(): ConnectionState =
         if (store.isImported()) {
             ConnectionState.Idle(friendName = store.friendName().orEmpty())
@@ -60,7 +71,42 @@ class MainViewModel(
             ConnectionState.Empty
         }
 
-    /** User tapped "Import from Drive link". */
+    /**
+     * Reconcile a [TunnelStateRepository.TunnelState] change into
+     * the UI's [ConnectionState]. The two are not 1:1 — the UI has
+     * extra states (Empty, Importing, ImportFailed, VpnConsent)
+     * that the service doesn't see. Rule:
+     *   - If the service is Disconnected, fall back to whichever
+     *     UI state we'd be in based on the credential store.
+     *   - Otherwise, project the service state onto the UI state
+     *     using the friendName from whatever's currently held.
+     */
+    private fun applyTunnelState(tunnel: TunnelStateRepository.TunnelState) {
+        val name = _state.value.friendNameOrNull() ?: store.friendName()
+        _state.value = when (tunnel) {
+            TunnelStateRepository.TunnelState.Disconnected -> {
+                // Don't clobber Importing / ImportFailed states —
+                // the service has nothing to say about those.
+                when (val cur = _state.value) {
+                    is ConnectionState.Importing,
+                    is ConnectionState.ImportFailed -> cur
+                    else -> initialState()
+                }
+            }
+            TunnelStateRepository.TunnelState.Starting -> {
+                if (name != null) ConnectionState.Connecting(name) else _state.value
+            }
+            TunnelStateRepository.TunnelState.Running -> {
+                if (name != null) ConnectionState.Connected(name) else _state.value
+            }
+            is TunnelStateRepository.TunnelState.Error -> {
+                ConnectionState.Failed(reason = tunnel.reason, friendName = name)
+            }
+        }
+    }
+
+    // --- Import flow --------------------------------------------------
+
     fun importFromDriveLink(url: String) {
         _state.value = ConnectionState.Importing
         viewModelScope.launch {
@@ -79,7 +125,6 @@ class MainViewModel(
         }
     }
 
-    /** User picked a file via the system file picker. */
     fun importFromFilePicker(resolver: ContentResolver, uri: Uri) {
         _state.value = ConnectionState.Importing
         viewModelScope.launch {
@@ -98,58 +143,53 @@ class MainViewModel(
         }
     }
 
-    /** User dismissed an import-failure or connect-failure banner. */
     fun dismissError() {
         _state.value = initialState()
         _vpnConsentRequest.value = false
+        // If the repository is still in Error, transition it back
+        // so the next Connect doesn't immediately re-error.
+        if (TunnelStateRepository.state.value is TunnelStateRepository.TunnelState.Error) {
+            TunnelStateRepository.markDisconnected()
+        }
     }
 
-    /** User tapped Connect. */
+    // --- Connect / disconnect -----------------------------------------
+
     fun onConnectClicked() {
         val current = _state.value
-        if (current !is ConnectionState.Idle) return
-        // Step 6 placeholder: ask the Activity to fire the system
-        // VPN-consent intent. Once it returns OK, the Activity
-        // calls onVpnConsentGranted; on cancel, onVpnConsentDenied.
-        _state.value = ConnectionState.VpnConsent(current.friendName)
+        if (current !is ConnectionState.Idle && current !is ConnectionState.Failed) return
+        val name = current.friendNameOrNull() ?: return
+        _state.value = ConnectionState.VpnConsent(name)
         _vpnConsentRequest.value = true
     }
 
-    /** Activity has dispatched the consent intent; clear the trigger. */
     fun onVpnConsentDispatched() {
         _vpnConsentRequest.value = false
     }
 
-    /** System dialog returned OK. Step 7 will start BeaconVpnService here. */
     fun onVpnConsentGranted() {
-        val current = _state.value
-        val name = current.friendNameOrNull() ?: return
-        _state.value = ConnectionState.Connecting(name)
-        // STEP 7: start BeaconVpnService here. Until then we
-        // synthetically transition to Failed so the UI can
-        // exercise that branch end-to-end.
-        viewModelScope.launch {
-            _state.value = ConnectionState.Failed(
-                reason = "VpnService integration is pending (Step 7).",
-                friendName = name,
-            )
+        // Service start: from this point the service drives the
+        // state via TunnelStateRepository. Don't manually set
+        // Connecting here — the service's markStarting() does it.
+        val ctx = getApplication<Application>().applicationContext
+        val intent = BeaconVpnService.startIntent(ctx)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.startForegroundService(ctx, intent)
+        } else {
+            ctx.startService(intent)
         }
     }
 
-    /** System dialog returned CANCELED. Drop back to Idle. */
     fun onVpnConsentDenied() {
         _state.value = initialState()
         _vpnConsentRequest.value = false
     }
 
-    /** User tapped Disconnect. Step 7 will stop the VpnService. */
     fun onDisconnectClicked() {
-        val name = _state.value.friendNameOrNull() ?: return
-        _state.value = ConnectionState.Idle(name)
-        // STEP 7: stop BeaconVpnService here.
+        val ctx = getApplication<Application>().applicationContext
+        ctx.startService(BeaconVpnService.stopIntent(ctx))
     }
 
-    /** User tapped "Re-import" / "Use a different config". */
     fun clearStoredConfig() {
         store.clear()
         _state.value = ConnectionState.Empty

@@ -1,25 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   AndroidManifest for the BeaconGate Android client.
-
-  Step 3 (Gradle skeleton) declares the bare minimum: a single launcher
-  Activity. Permissions for VpnService, foreground service, and notifications
-  land in Step 7 alongside the BeaconVpnService implementation; landing them
-  early would make the manifest claim capabilities the app cannot yet honor.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Permission to fetch the Drive-hosted .bg config. The same
-         permission is reused by the tunnel transport in Step 7. -->
+    <!-- Drive-link config fetch + the tunnel transport itself. -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Foreground service: VpnService must be foreground on
+         Android 8+, and Android 14+ requires explicit FGS-type
+         declarations. SPECIAL_USE is the broadest valid type for a
+         user-initiated VPN. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Persistent notification (Android 13+ runtime permission).
+         The service won't crash without it but the OS suppresses
+         the notification, which makes the foreground requirement
+         look broken to the user. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.BeaconGate"
-        tools:targetApi="34"
-        xmlns:tools="http://schemas.android.com/tools">
+        tools:targetApi="34">
 
         <activity
             android:name=".MainActivity"
@@ -30,6 +37,36 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          BeaconVpnService — captures all phone traffic into a TUN
+          device, forwards via tun2socks to our local SOCKS5 listener
+          (managed by the gomobile-bound BeaconGate runtime).
+
+          - permission="BIND_VPN_SERVICE": the system binds to us
+            with this permission so only the OS can launch us as a
+            VPN service.
+          - foregroundServiceType="specialUse": Android 14 enforces
+            foreground typing; VPN-as-special-use is the supported
+            cross-version pattern.
+          - exported="false": only this process invokes the service
+            (via MainViewModel → context.startForegroundService). No
+            third-party app should be able to start our VPN.
+          - Intent filter on android.net.VpnService: required so the
+            system can resolve us as a VPN provider.
+        -->
+        <service
+            android:name=".BeaconVpnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="VPN tunnel for BeaconGate" />
+        </service>
     </application>
 
 </manifest>

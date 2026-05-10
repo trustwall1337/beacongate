@@ -8,8 +8,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import bindings.Bindings
@@ -36,17 +34,12 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
 
-    private val viewModel: MainViewModel by viewModels {
-        // Manual factory so we can inject the CredentialStore (the
-        // ViewModel can't have an Activity-creating constructor —
-        // ViewModels outlive Activities).
-        object : ViewModelProvider.Factory {
-            override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                @Suppress("UNCHECKED_CAST")
-                return MainViewModel(CredentialStore(applicationContext)) as T
-            }
-        }
-    }
+    /**
+     * Default [androidx.lifecycle.AndroidViewModelFactory] is fine —
+     * MainViewModel is an [AndroidViewModel] and its CredentialStore
+     * defaults to one constructed from the Application context.
+     */
+    private val viewModel: MainViewModel by viewModels()
 
     /**
      * VPN-consent launcher. Android's [VpnService.prepare] returns
