@@ -97,9 +97,10 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.1")
-    // EncryptedSharedPreferences for storing the imported .bg
-    // contents under the Android Keystore master key.
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // NOTE: previously pulled androidx.security:security-crypto:1.1.0-alpha06
+    // for EncryptedSharedPreferences. Removed in v1 — that alpha
+    // crashes native-side on Samsung Android 12/13 during Keystore
+    // init (see CredentialStore.kt for the trade-off rationale).
     // Material3 brings the standard color/typography theme; using
     // a thin theme keeps the dependency cost low (~500 KB after R8).
     implementation("com.google.android.material:material:1.12.0")

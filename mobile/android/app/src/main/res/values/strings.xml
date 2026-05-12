@@ -17,6 +17,7 @@
     <string name="status_idle">Ready</string>
     <string name="status_connecting">Connecting…</string>
     <string name="status_connected">Connected</string>
+    <string name="status_degraded">Connected (degraded)</string>
     <string name="status_vpn_consent">Awaiting VPN permission…</string>
     <string name="status_failed">Disconnected</string>
     <string name="status_importing">Importing…</string>
@@ -25,6 +26,12 @@
     <string name="disconnect_button">Disconnect</string>
     <string name="connecting_button">Connecting…</string>
     <string name="reimport_button">Use a different config</string>
+    <string name="traffic_scope_label">Traffic scope</string>
+    <string name="route_all_switch">Route all apps</string>
+    <string name="select_apps_button">Select apps</string>
+    <string name="apps_selected_line">Selected apps: %1$d</string>
+    <string name="pick_apps_title">Choose apps to route</string>
+    <string name="pick_apps_empty">No launchable apps found on this device.</string>
 
     <!-- Error banner -->
     <string name="error_banner_title">Something went wrong</string>

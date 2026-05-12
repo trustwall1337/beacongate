@@ -1,11 +1,14 @@
 package com.beacongate
 
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Bundle
 import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -33,6 +36,7 @@ import kotlinx.coroutines.launch
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private lateinit var trafficScopeStore: TrafficScopeStore
 
     /**
      * Default [androidx.lifecycle.AndroidViewModelFactory] is fine —
@@ -73,13 +77,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        BootProbe.mark(this, 4, "activity_oncreate_entered")
         super.onCreate(savedInstanceState)
+        BootProbe.mark(this, 5, "after_super_oncreate")
         binding = ActivityMainBinding.inflate(layoutInflater)
+        BootProbe.mark(this, 6, "after_binding_inflate")
         setContentView(binding.root)
+        BootProbe.mark(this, 7, "after_setContentView")
+        trafficScopeStore = TrafficScopeStore(applicationContext)
 
-        binding.versionLine.text = getString(R.string.version_line, Bindings.version())
+        // Wrap the gomobile call in try/catch so a JNI loader
+        // failure surfaces in the UI instead of crashing the whole
+        // process before our breadcrumb at step 8 can be written.
+        val version: String = try {
+            Bindings.version().also { BootProbe.mark(this, 8, "after_bindings_version") }
+        } catch (t: Throwable) {
+            BootProbe.mark(this, 8, "bindings_version_THREW")
+            "load-failed: ${t.javaClass.simpleName}"
+        }
+        binding.versionLine.text = getString(R.string.version_line, version)
         wireButtons()
         observeState()
+        BootProbe.mark(this, 9, "activity_oncreate_complete")
+    }
+
+    override fun onStart() {
+        BootProbe.mark(this, 10, "activity_onStart_entered")
+        super.onStart()
+        BootProbe.mark(this, 11, "activity_onStart_exit")
+    }
+
+    override fun onResume() {
+        BootProbe.mark(this, 12, "activity_onResume_entered")
+        super.onResume()
+        BootProbe.mark(this, 13, "activity_onResume_exit")
     }
 
     private fun wireButtons() {
@@ -100,8 +131,86 @@ class MainActivity : AppCompatActivity() {
         binding.reimportButton.setOnClickListener {
             viewModel.clearStoredConfig()
         }
+        binding.routeAllSwitch.setOnCheckedChangeListener { _, isChecked ->
+            trafficScopeStore.setRouteAllTraffic(isChecked)
+            renderTrafficScopeControls()
+        }
+        binding.selectAppsButton.setOnClickListener {
+            openAppPickerDialog()
+        }
+        renderTrafficScopeControls()
         // primaryButton's behaviour depends on state — see
         // applyState() for the click handler swap.
+    }
+
+    private data class AppOption(val label: String, val packageName: String)
+
+    private fun listLaunchableApps(): List<AppOption> {
+        val pm = packageManager
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        return pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
+            .mapNotNull { ri ->
+                val pkg = ri.activityInfo?.packageName ?: return@mapNotNull null
+                if (pkg == packageName) return@mapNotNull null
+                val appInfo: ApplicationInfo = ri.activityInfo.applicationInfo ?: return@mapNotNull null
+                val label = pm.getApplicationLabel(appInfo).toString().ifBlank { pkg }
+                AppOption(label = label, packageName = pkg)
+            }
+            .distinctBy { it.packageName }
+            .sortedBy { it.label.lowercase() }
+    }
+
+    private fun openAppPickerDialog() {
+        val apps = listLaunchableApps()
+        if (apps.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setMessage(getString(R.string.pick_apps_empty))
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+            return
+        }
+        val installed = apps.map { it.packageName }.toSet()
+        // Prune any "ghost" packages from the stored set up front so the
+        // picker's pre-checked state matches what's actually installable —
+        // otherwise a user who selects nothing visible still ends up with
+        // the original default ghosts persisting in storage.
+        val selected = (trafficScopeStore.selectedPackages() intersect installed).toMutableSet()
+        val labels = apps.map { it.label }.toTypedArray()
+        val checked = apps.map { selected.contains(it.packageName) }.toBooleanArray()
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.pick_apps_title))
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
+                val pkg = apps[which].packageName
+                if (isChecked) selected.add(pkg) else selected.remove(pkg)
+            }
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                // Persist only currently-installed selections; ghosts
+                // (defaults / uninstalled apps) get pruned on save so the
+                // saved set, the displayed count, and what the VPN actually
+                // allows all agree.
+                val pruned = selected intersect installed
+                trafficScopeStore.setSelectedPackages(pruned)
+                renderTrafficScopeControls()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun renderTrafficScopeControls() {
+        val routeAll = trafficScopeStore.routeAllTraffic()
+        if (binding.routeAllSwitch.isChecked != routeAll) {
+            binding.routeAllSwitch.isChecked = routeAll
+        }
+        binding.selectAppsButton.isEnabled = !routeAll
+        // The displayed count must equal the number of apps the VPN will
+        // actually route — i.e. selected ∩ installed. Without this filter
+        // the count includes "ghost" packages (defaults that aren't on the
+        // device, or apps the user uninstalled), which the VPN silently
+        // drops at startup and confuses the operator.
+        val installed = listLaunchableApps().map { it.packageName }.toSet()
+        val effective = trafficScopeStore.selectedPackages() intersect installed
+        binding.appsSelectedLine.text = getString(R.string.apps_selected_line, effective.size)
+        binding.appsSelectedLine.alpha = if (routeAll) 0.5f else 1.0f
     }
 
     private fun observeState() {
@@ -152,6 +261,7 @@ class MainActivity : AppCompatActivity() {
             is ConnectionState.VpnConsent -> renderVpnConsent(state.friendName)
             is ConnectionState.Connecting -> renderConnecting(state.friendName)
             is ConnectionState.Connected -> renderConnected(state.friendName)
+            is ConnectionState.Degraded -> renderDegraded(state.friendName, state.reason)
             is ConnectionState.Failed -> renderFailed(state.reason, state.friendName)
         }
     }
@@ -217,6 +327,18 @@ class MainActivity : AppCompatActivity() {
         binding.statusGroup.visibility = View.VISIBLE
         binding.errorBanner.visibility = View.GONE
         binding.statusValue.text = getString(R.string.status_connected)
+        binding.friendLine.text = getString(R.string.friend_line, friendName)
+        binding.primaryButton.isEnabled = true
+        binding.primaryButton.text = getString(R.string.disconnect_button)
+        binding.primaryButton.setOnClickListener { viewModel.onDisconnectClicked() }
+    }
+
+    private fun renderDegraded(friendName: String, reason: String) {
+        binding.importGroup.visibility = View.GONE
+        binding.statusGroup.visibility = View.VISIBLE
+        binding.errorBanner.visibility = View.VISIBLE
+        binding.errorMessage.text = reason
+        binding.statusValue.text = getString(R.string.status_degraded)
         binding.friendLine.text = getString(R.string.friend_line, friendName)
         binding.primaryButton.isEnabled = true
         binding.primaryButton.text = getString(R.string.disconnect_button)

@@ -28,12 +28,6 @@
 # survive obfuscation.
 -keepattributes Signature, InnerClasses, EnclosingMethod
 
-# --- Tink (under EncryptedSharedPreferences) ---------------------------
-# Tink's jars reference JSR-305 nullness / concurrency annotations that
-# aren't on the Android classpath. The annotations are erased at
-# runtime; safe to silence the missing-class warnings.
--dontwarn javax.annotation.**
-
 # --- Nothing else for v1 ------------------------------------------------
 # AppCompat, Material, AndroidX security, lifecycle: all ship with
 # their own consumer-rules.pro inside the .aar; AGP picks those up

@@ -74,6 +74,40 @@
                 android:textSize="14sp"
                 tools:text="Imported: mahdi" />
 
+            <TextView
+                android:id="@+id/trafficScopeLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:textSize="14sp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:text="@string/traffic_scope_label" />
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/routeAllSwitch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/route_all_switch" />
+
+            <TextView
+                android:id="@+id/appsSelectedLine"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textSize="13sp"
+                android:textColor="?android:attr/textColorSecondary"
+                tools:text="Selected apps: 3" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/selectAppsButton"
+                style="?attr/materialButtonOutlinedStyle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textSize="14sp"
+                android:text="@string/select_apps_button" />
+
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/primaryButton"
                 android:layout_width="match_parent"

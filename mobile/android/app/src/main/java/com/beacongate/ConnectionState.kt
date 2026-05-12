@@ -24,6 +24,8 @@ package com.beacongate
  *   VpnConsent      → Connecting      (user accepts system dialog)
  *   VpnConsent      → Idle            (user dismisses system dialog)
  *   Connecting      → Connected       (transport probe succeeds)
+ *   Connected       → Degraded        (probe timeout/failure)
+ *   Degraded        → Connected       (probe recovers)
  *   Connecting      → Failed          (start failed: SOCKS bind, transport, etc.)
  *   Connected       → Idle            (user taps Disconnect)
  *   Connected       → Failed          (transport went unhealthy)
@@ -71,6 +73,9 @@ sealed class ConnectionState {
     /** Tunnel up. UI shows the disconnect button. */
     data class Connected(val friendName: String) : ConnectionState()
 
+    /** Tunnel up, but health probes are currently failing. */
+    data class Degraded(val friendName: String, val reason: String) : ConnectionState()
+
     /** Tunnel failed. Carries a UI-displayable reason. */
     data class Failed(val reason: String, val friendName: String?) : ConnectionState()
 
@@ -85,6 +90,7 @@ sealed class ConnectionState {
         is VpnConsent -> friendName
         is Connecting -> friendName
         is Connected -> friendName
+        is Degraded -> friendName
         is Failed -> friendName
         Empty, Importing -> null
         is ImportFailed -> null

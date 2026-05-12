@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
@@ -16,6 +17,8 @@ import bindings.Bindings
 import bindings.ConfigSnapshot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -65,6 +68,7 @@ class BeaconVpnService : VpnService() {
      */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var startJob: Job? = null
+    private var healthJob: Job? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -127,6 +131,7 @@ class BeaconVpnService : VpnService() {
             .addRoute("0.0.0.0", 0)
             .addDnsServer("1.1.1.1")
             .setMtu(TUN_MTU)
+            .apply { applyTrafficScope(this) }
             .establish()
         if (pfd == null) {
             failAndStop("Could not establish the TUN device. Check VPN permission.")
@@ -157,6 +162,7 @@ class BeaconVpnService : VpnService() {
 
         TunnelStateRepository.markRunning()
         Log.i(TAG, "VPN running for ${snapshot.clientID}")
+        startHealthMonitor()
     }
 
     /**
@@ -178,6 +184,7 @@ class BeaconVpnService : VpnService() {
      */
     private fun shutdown(reason: String?) {
         startJob?.cancel()
+        healthJob?.cancel()
         try {
             Bindings.stopVpn()
         } catch (t: Throwable) {
@@ -268,6 +275,31 @@ class BeaconVpnService : VpnService() {
         private const val NOTIFICATION_CHANNEL_ID = "beacongate_vpn_v1"
         private const val NOTIFICATION_ID = 1001
         private const val TUN_MTU = 1500
+        // Health probe tuning. Apps Script call latency on real Iranian
+        // mobile networks: p50 ≈ 1.5–2s, p95 ≈ 4–6s, p99 ≈ 8s+.
+        //
+        // **Timeout 8s** is above p95 — a healthy tunnel won't false-flag
+        // as degraded under normal load. The earlier 2.5s value sat below
+        // p95 and made every page load momentarily mark the tunnel
+        // degraded, which surfaced as ugly UI flapping.
+        //
+        // **Interval 15s** halves probe churn vs. the earlier 8s. Each
+        // skipped probe is one fewer Apps Script invocation competing
+        // with the user's actual traffic for the same per-account quota.
+        // 15s is still responsive enough that an actually-broken tunnel
+        // reaches Degraded within a tap or two of the user noticing.
+        private const val HEALTH_PROBE_TIMEOUT_MS = 8_000L
+        private const val HEALTH_CHECK_INTERVAL_MS = 15_000L
+        // High-churn background packages that create significant DNS/UDP
+        // traffic on emulator and low-end devices. Excluding them reduces
+        // socket pressure and improves perceived browsing speed.
+        private val DISALLOWED_PACKAGES = listOf(
+            "com.google.android.gms",
+            "com.google.android.gsf",
+            "com.google.android.gsf.login",
+            "com.android.vending",
+            "com.google.android.syncadapters.contacts",
+        )
 
         /** Convenience for the Activity / ViewModel side. */
         fun startIntent(context: Context): Intent =
@@ -276,5 +308,67 @@ class BeaconVpnService : VpnService() {
         /** Convenience for the disconnect path. */
         fun stopIntent(context: Context): Intent =
             Intent(context, BeaconVpnService::class.java).setAction(ACTION_STOP)
+    }
+
+    private fun applyTrafficScope(builder: Builder) {
+        val scopeStore = TrafficScopeStore(applicationContext)
+        if (!scopeStore.routeAllTraffic()) {
+            val selected = scopeStore.selectedPackages().toMutableSet()
+            // Always route BeaconGate itself; otherwise control/runtime calls
+            // may bypass the VPN app-scope and confuse startup behavior.
+            selected.add(packageName)
+            var allowedAdded = 0
+            for (pkg in selected) {
+                try {
+                    builder.addAllowedApplication(pkg)
+                    allowedAdded++
+                } catch (_: PackageManager.NameNotFoundException) {
+                    // package removed after user selected it.
+                } catch (t: Throwable) {
+                    Log.w(TAG, "could not allow package=$pkg: ${t.message}")
+                }
+            }
+            Log.i(TAG, "VPN app-scope mode enabled (allowed_packages=$allowedAdded)")
+            return
+        }
+        Log.i(TAG, "VPN all-traffic mode enabled")
+        for (pkg in DISALLOWED_PACKAGES) {
+            try {
+                builder.addDisallowedApplication(pkg)
+            } catch (_: PackageManager.NameNotFoundException) {
+                // Package not present on this device image; ignore.
+            } catch (t: Throwable) {
+                Log.w(TAG, "could not disallow package=$pkg: ${t.message}")
+            }
+        }
+    }
+
+    /**
+     * Background health monitor: keeps VPN up even when probes fail,
+     * and only updates UI quality (Running vs Degraded).
+     */
+    private fun startHealthMonitor() {
+        healthJob?.cancel()
+        healthJob = scope.launch {
+            var degraded = false
+            while (isActive) {
+                try {
+                    Bindings.waitUntilHealthy(HEALTH_PROBE_TIMEOUT_MS)
+                    if (degraded) {
+                        TunnelStateRepository.markRunning()
+                        degraded = false
+                    }
+                } catch (t: Throwable) {
+                    val reason = "Tunnel running but unhealthy: ${t.message}"
+                    if (!degraded) {
+                        TunnelStateRepository.markDegraded(reason)
+                        degraded = true
+                    } else {
+                        Log.w(TAG, reason)
+                    }
+                }
+                delay(HEALTH_CHECK_INTERVAL_MS)
+            }
+        }
     }
 }

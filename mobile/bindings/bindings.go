@@ -142,6 +142,12 @@ func StartTunnel(cfg *ConfigSnapshot) error {
 	pump.Start()
 
 	srv := socks.NewServer(pump)
+	// Android VPN path sends DNS as UDP; tun2socks uses SOCKS5 UDP ASSOCIATE
+	// for that traffic, so mobile must enable it on the local SOCKS listener.
+	srv.EnableUDPAssociate(true)
+	// Keep association fan-out bounded to avoid FD exhaustion on noisy
+	// mobile/emulator backgrounds.
+	srv.SetUDPAssociateLimit(48)
 	if cfg.raw.Socks.Username != "" {
 		srv.SetAuth(socks.AuthConfig{
 			Username: cfg.raw.Socks.Username,
@@ -257,6 +263,30 @@ func Status() *StatusSnapshot {
 		snap.TransportHealthy = d.Healthy
 	}
 	return snap
+}
+
+// WaitUntilHealthy polls Status() until TransportHealthy is true or timeout
+// elapses. Returns nil on success; otherwise a descriptive error.
+func WaitUntilHealthy(timeoutMs int64) error {
+	if timeoutMs <= 0 {
+		timeoutMs = 10_000
+	}
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for time.Now().Before(deadline) {
+		s := Status()
+		if s.TransportHealthy {
+			return nil
+		}
+		if s.LastError != "" {
+			// Keep polling briefly to allow transient startup errors to clear.
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	s := Status()
+	if s.LastError != "" {
+		return fmt.Errorf("transport unhealthy: %s", s.LastError)
+	}
+	return errors.New("transport unhealthy: timeout waiting for healthy probe")
 }
 
 // GetStats returns byte and session counters for the active tunnel.

@@ -3,7 +3,9 @@ package bindings
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
+	"syscall"
 
 	"github.com/xjasonlyu/tun2socks/v2/engine"
 )
@@ -58,6 +60,7 @@ func StartVpn(cfg *ConfigSnapshot, tunFd int) error {
 
 	// Step 1: bring up the BeaconGate side first. If this fails,
 	// nothing else has been touched.
+	bestEffortRaiseNoFile()
 	if err := StartTunnel(cfg); err != nil {
 		return fmt.Errorf("StartVpn: %w", err)
 	}
@@ -69,10 +72,12 @@ func StartVpn(cfg *ConfigSnapshot, tunFd int) error {
 	// the only legal way).
 	socksAddr := cfg.raw.ListenAddr
 	engine.Insert(&engine.Key{
-		MTU:      defaultTUNMTU,
-		Device:   fmt.Sprintf("fd://%d", tunFd),
-		Proxy:    "socks5://" + socksAddr,
-		LogLevel: "info",
+		MTU:    defaultTUNMTU,
+		Device: fmt.Sprintf("fd://%d", tunFd),
+		Proxy:  "socks5://" + socksAddr,
+		// "warn" avoids high-volume per-packet logs that can become a
+		// bottleneck on emulator / lower-end devices.
+		LogLevel: "warn",
 	})
 	// engine.Start launches its goroutines and returns
 	// immediately; failures are surfaced via panics or zap-logged
@@ -134,4 +139,25 @@ func IsVpnRunning() bool {
 	vpnMu.Lock()
 	defer vpnMu.Unlock()
 	return vpnRunning
+}
+
+func bestEffortRaiseNoFile() {
+	if runtime.GOOS != "android" && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		return
+	}
+	var lim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim); err != nil {
+		return
+	}
+	target := lim.Max
+	if target > 8192 {
+		target = 8192
+	}
+	if target <= lim.Cur {
+		return
+	}
+	_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{
+		Cur: target,
+		Max: lim.Max,
+	})
 }

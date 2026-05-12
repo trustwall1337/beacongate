@@ -1,72 +1,50 @@
 package com.beacongate
 
 import android.content.Context
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import android.content.SharedPreferences
 
 /**
  * On-device store for the imported `.bg` config JSON.
  *
- * Backed by [EncryptedSharedPreferences] — the JSON payload is
- * authenticated-encrypted at rest with an AES-256-GCM key whose
- * master key lives in the Android Keystore. The Keystore master key
- * is hardware-backed on devices with a TEE/StrongBox (most modern
- * Iranian-sold phones); on devices without one, it falls back to
- * software but is still scoped to this app's UID.
+ * v1 implementation: plain UID-scoped [SharedPreferences].
  *
- * The threat model this addresses: a friend's phone is seized at a
- * border / by an authority who can pull the userdata partition but
- * does not have root + Keystore extraction tooling. Without
- * encryption, the imported `.bg` (which contains the per-friend AES
- * key) would be plain JSON in
- * `/data/data/com.beacongate/shared_prefs/`. With encryption, an
- * attacker needs to defeat the Keystore — which raises the bar
- * substantially.
+ * **Original plan was [androidx.security.crypto.EncryptedSharedPreferences],**
+ * but the 1.1.0-alpha06 release is unstable on certain Samsung
+ * Android 12/13 builds — Tink's Keystore initialization crashes
+ * native-side at app launch, in a way that bypasses Java's
+ * UncaughtExceptionHandler. We hit that bring-up bug on Samsung
+ * SM-G988B (Android 13 / SDK 33) during first-friend testing.
  *
- * **Single-profile assumption.** v1 holds at most one config (the
- * one the friend imported). Multiple-profile support is a v2
- * decision that requires UI changes anyway, so this class doesn't
- * expose a list.
+ * **Threat model trade-off.** Plain SharedPreferences are stored at
+ * `/data/data/com.beacongate/shared_prefs/<file>.xml`, owned by
+ * this app's UID, mode 0600. The threat surface vs. encryption:
+ *
+ *   - Non-rooted attacker with physical access: unchanged.
+ *     `/data/data` is unreadable without root or `adb backup -ab`
+ *     (which is disabled — `android:allowBackup="false"`).
+ *   - Rooted attacker with physical access: marginally weaker. With
+ *     EncryptedSharedPreferences they'd also need to extract the
+ *     Keystore master key (hardware-backed on most devices, raises
+ *     the bar). With plain SharedPreferences they read the JSON
+ *     directly. Per-friend revocation
+ *     (server-side `beacongate-admin revoke-client`) mitigates this:
+ *     a stolen `.bg` is one VPS command away from being dead.
+ *   - Other apps on the device: unchanged. UID-scoped storage
+ *     prevents cross-app reads in either case.
+ *
+ * Net: this is a small step down, mitigated by per-friend
+ * revocation. We can revisit encrypted storage in v1.1 once the
+ * Tink alpha stabilizes or we switch to a self-managed AES-GCM
+ * wrapper around the same `SharedPreferences` keys.
  */
 class CredentialStore(context: Context) {
 
-    /**
-     * EncryptedSharedPreferences instance. Created once per
-     * CredentialStore instance — the Jetpack Security wrapper does
-     * its own caching internally, so cheap repeated calls.
-     *
-     * The master key spec: AES256_GCM, default validity (the
-     * Keystore-default; effectively never expires for this use
-     * case). User authentication NOT required — we want the
-     * tunnel to come up after a phone reboot without forcing the
-     * friend to unlock-then-unlock-app.
-     */
-    private val prefs by lazy {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        EncryptedSharedPreferences.create(
-            context,
-            PREFS_FILE_NAME,
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
-        )
-    }
+    private val prefs: SharedPreferences =
+        context.getSharedPreferences(PREFS_FILE_NAME, Context.MODE_PRIVATE)
 
     /**
      * Persist the imported `.bg` JSON. Overwrites any existing
      * stored config; v1 is single-profile.
-     *
-     * @param json raw config JSON (NOT a `bg://` URI — those are
-     *             decoded upstream in [bindings.Bindings.importConfig]
-     *             before reaching this layer; we always store the
-     *             canonical JSON form for size and stability).
-     * @param friendName operator-assigned client_id, used as the
-     *                   display label (e.g. "mahdi"). Stored
-     *                   alongside the JSON so the UI can show
-     *                   "Imported: <name>" without re-parsing the
-     *                   payload.
      */
     fun save(json: String, friendName: String) {
         prefs.edit()
@@ -75,26 +53,16 @@ class CredentialStore(context: Context) {
             .apply()
     }
 
-    /**
-     * Returns the previously-stored JSON, or null if no config has
-     * been imported yet (fresh install or after [clear]).
-     */
+    /** Returns the previously-stored JSON, or null if nothing stored. */
     fun loadJson(): String? = prefs.getString(KEY_CONFIG_JSON, null)
 
-    /**
-     * Returns the friend's display name (the imported config's
-     * client_id), or null when no config is stored.
-     */
+    /** Returns the friend's display name, or null when no config is stored. */
     fun friendName(): String? = prefs.getString(KEY_FRIEND_NAME, null)
 
     /** Whether a config has been imported and persisted. */
     fun isImported(): Boolean = loadJson() != null
 
-    /**
-     * Wipe the stored config. Used by an "import a different
-     * config" flow (Step 5 polish) and by the upcoming v2
-     * "factory reset" UI. Safe to call when no config is stored.
-     */
+    /** Wipe the stored config. Safe to call when nothing is stored. */
     fun clear() {
         prefs.edit()
             .remove(KEY_CONFIG_JSON)
@@ -103,10 +71,9 @@ class CredentialStore(context: Context) {
     }
 
     companion object {
-        // Filename of the encrypted prefs file under
+        // Filename of the prefs file under
         // /data/data/com.beacongate/shared_prefs/. Versioned so a
-        // future schema migration can be a no-op for old installs
-        // (we just ignore the v1 file and read from a v2 one).
+        // future schema migration can ignore the v1 file.
         private const val PREFS_FILE_NAME = "beacongate_creds_v1"
 
         private const val KEY_CONFIG_JSON = "config_json"

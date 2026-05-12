@@ -39,6 +39,10 @@ class MainViewModel(
     application: Application,
     private val store: CredentialStore = CredentialStore(application.applicationContext),
 ) : AndroidViewModel(application) {
+    constructor(application: Application) : this(
+        application,
+        CredentialStore(application.applicationContext),
+    )
 
     private val _state: MutableStateFlow<ConnectionState> = MutableStateFlow(initialState())
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -98,6 +102,16 @@ class MainViewModel(
             }
             TunnelStateRepository.TunnelState.Running -> {
                 if (name != null) ConnectionState.Connected(name) else _state.value
+            }
+            is TunnelStateRepository.TunnelState.Degraded -> {
+                if (name != null) {
+                    ConnectionState.Degraded(
+                        friendName = name,
+                        reason = tunnel.reason,
+                    )
+                } else {
+                    _state.value
+                }
             }
             is TunnelStateRepository.TunnelState.Error -> {
                 ConnectionState.Failed(reason = tunnel.reason, friendName = name)

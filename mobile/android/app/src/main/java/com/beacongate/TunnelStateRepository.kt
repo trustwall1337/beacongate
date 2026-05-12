@@ -51,6 +51,12 @@ object TunnelStateRepository {
         data object Running : TunnelState()
 
         /**
+         * VPN is up but transport probes are currently failing.
+         * Traffic may be partially degraded.
+         */
+        data class Degraded(val reason: String) : TunnelState()
+
+        /**
          * Service tried to start but a layer failed. Carries the
          * platform-displayable reason. The service has already
          * cleaned up (closed tun fd, called Bindings.stopVpn);
@@ -75,6 +81,11 @@ object TunnelStateRepository {
     /** Service signals: Bindings.startVpn returned successfully. */
     internal fun markRunning() {
         _state.value = TunnelState.Running
+    }
+
+    /** Service signals: VPN is up but health checks are failing. */
+    internal fun markDegraded(reason: String) {
+        _state.value = TunnelState.Degraded(reason)
     }
 
     /** Service signals: a layer failed; everything is torn down. */
