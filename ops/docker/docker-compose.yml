@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
     ports:
       # The tunnel endpoint. Front this with TLS in production.
-      - "8080:8080"
+      - "127.0.0.1:18080:8080"
       # Admin API is disabled in the default config. To enable: set
       # `admin.token` in your server_config.json and uncomment below.
       # The default policy is loopback-only auth, which does NOT work

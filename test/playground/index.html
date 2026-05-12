@@ -1,0 +1,506 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>BeaconGate client playground</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 920px;
+    margin: 2em auto;
+    padding: 0 1em;
+    color: #222;
+    line-height: 1.5;
+  }
+  h1 { margin-bottom: 0.2em; }
+  h2 { margin-top: 1.8em; font-size: 1.1em; border-bottom: 1px solid #eee; padding-bottom: 0.3em; }
+  p.lead { color: #555; margin-top: 0; }
+  textarea {
+    width: 100%;
+    height: 220px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    padding: 0.6em;
+    box-sizing: border-box;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    resize: vertical;
+  }
+  textarea:focus { outline: none; border-color: #2a8; }
+  .row { display: flex; align-items: center; gap: 1em; margin: 1em 0; flex-wrap: wrap; }
+  button {
+    padding: 0.55em 1.6em; font-size: 1em;
+    background: #2a8; color: white; border: none; border-radius: 4px;
+    cursor: pointer;
+  }
+  button:hover { background: #1a7; }
+  button:disabled { background: #888; cursor: wait; }
+  button.secondary { background: #555; }
+  button.secondary:hover { background: #333; }
+  button.warn { background: #c33; }
+  button.warn:hover { background: #a22; }
+  #status { color: #666; font-size: 0.95em; }
+  .step {
+    padding: 0.45em 0.8em; margin: 0.3em 0;
+    border-left: 4px solid #999; background: #f7f7f7;
+    border-radius: 0 4px 4px 0;
+  }
+  .step.ok { border-color: #2a8; }
+  .step.fail { border-color: #c33; background: #fff5f5; }
+  .step .name { font-weight: 600; }
+  .step .detail {
+    color: #555; font-size: 0.9em; margin-top: 0.2em;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .step .elapsed { color: #888; font-size: 0.85em; float: right; }
+  .step .mark { display: inline-block; width: 1.2em; }
+  .proxy-box {
+    background: #f0fff5; border: 1px solid #2a8; border-radius: 6px;
+    padding: 1em; margin: 1em 0;
+  }
+  .proxy-box code {
+    background: white; padding: 4px 10px; border-radius: 4px;
+    border: 1px solid #ccc; font-size: 1.05em;
+  }
+  .proxy-box button.copy {
+    padding: 0.25em 0.8em; font-size: 0.9em; background: #2a8;
+  }
+  .stat { display: inline-block; margin-right: 1.5em; color: #444; }
+  .stat strong { color: #222; font-variant-numeric: tabular-nums; }
+  .activity {
+    max-height: 360px; overflow-y: auto; border: 1px solid #ddd;
+    border-radius: 4px; background: #fafafa; font-size: 13px;
+  }
+  .activity .entry {
+    padding: 0.35em 0.6em; border-bottom: 1px solid #eee;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .activity .entry:last-child { border-bottom: none; }
+  .activity .kind-open { color: #1a7; }
+  .activity .kind-close { color: #555; }
+  .activity .kind-error { color: #c33; }
+  .activity .ts { color: #aaa; margin-right: 0.6em; }
+  .activity .target { color: #06a; font-weight: 600; }
+  .activity .empty { color: #999; padding: 1em; text-align: center; }
+  .footer {
+    color: #777; font-size: 0.85em; margin-top: 2.5em;
+    border-top: 1px solid #eee; padding-top: 1em;
+  }
+  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 0.92em; }
+  .hidden { display: none; }
+  .tab-row { display: flex; gap: 0.5em; margin-bottom: 0.5em; }
+  .tab-row button { padding: 0.3em 0.9em; font-size: 0.9em; background: #ddd; color: #333; }
+  .tab-row button.active { background: #2a8; color: white; }
+  pre.cmd {
+    background: #222; color: #eee; padding: 0.8em 1em; border-radius: 4px;
+    overflow-x: auto; font-size: 0.85em;
+  }
+</style>
+
+<h1>BeaconGate client playground</h1>
+<p class="lead">
+  Test a client config end-to-end against the real tunnel. Click <strong>Connect</strong> to
+  spin up an in-process tunnel on a local SOCKS5 port — point your browser there to measure
+  real end-user page-load timing. Click <strong>Disconnect</strong> when done.
+</p>
+
+<!-- === Step 1: Config + Connect ============================== -->
+<div id="section-config">
+  <h2>1. Paste client_config.json</h2>
+  <textarea id="config" spellcheck="false" autocomplete="off" placeholder='{
+  "client_id": "test-client",
+  "listen_addr": "127.0.0.1:1080",
+  "server": { "key": "<base64 AES key>" },
+  "transport": { ... }
+}'></textarea>
+  <div class="row">
+    <button id="connect">Connect</button>
+    <span id="status"></span>
+  </div>
+  <div id="connect-result"></div>
+</div>
+
+<!-- === Step 2: Proxy info (shown only after connect) ========== -->
+<div id="section-proxy" class="hidden">
+  <h2>2. Use the tunnel from your browser</h2>
+  <div class="proxy-box">
+    <div style="margin-bottom: 0.6em;">
+      <strong>SOCKS5 proxy:</strong>
+      <code id="socks-addr">—</code>
+      <button class="copy" onclick="copyText('socks-addr')">Copy</button>
+    </div>
+
+    <div style="margin-top: 1em; padding-top: 0.8em; border-top: 1px solid #cce5d3;">
+      <strong>Easiest — launch a browser through the proxy:</strong>
+      <div style="margin-top: 0.4em;">
+        <label style="font-size: 0.9em; color: #444;">
+          Open URL:
+          <input id="launch-url" type="text" placeholder="https://api.ipify.org/  (default — proves the tunnel works)"
+                 style="width: 380px; padding: 4px 8px; border: 1px solid #ccc; border-radius: 3px; font-family: ui-monospace, Menlo, monospace; font-size: 13px;">
+        </label>
+        <button id="launch-browser" style="margin-left: 0.5em;">Launch browser through proxy</button>
+        <span id="launch-result" style="margin-left: 0.6em; font-size: 0.9em;"></span>
+      </div>
+      <div style="margin-top: 0.4em; font-size: 0.85em; color: #666;">
+        Spawns a fresh Chrome/Edge window with its own throwaway profile. All traffic in that
+        window routes through the tunnel. Cookies don't leak from your normal browser. Close
+        the window to clean up.
+      </div>
+    </div>
+
+    <details style="margin-top: 1em;">
+      <summary style="cursor: pointer; color: #444; font-size: 0.92em;">
+        Or — configure proxy manually (Firefox, system-wide, etc.)
+      </summary>
+      <div style="margin-top: 0.6em; color: #444; font-size: 0.9em;">
+        <strong>Firefox:</strong> Preferences → Network Settings → Manual proxy → SOCKS v5 = address above, check "Proxy DNS when using SOCKS v5".<br>
+        <strong>Chrome via CLI:</strong> <code>open -na "Google Chrome" --args --proxy-server="socks5://&lt;addr&gt;"</code>
+      </div>
+      <div style="margin-top: 0.6em;">
+        <strong>Mac system-wide</strong> (replace "Wi-Fi" with your network service name):
+      </div>
+      <pre class="cmd" id="mac-cmd">networksetup -setsocksfirewallproxy "Wi-Fi" 127.0.0.1 PORT
+# disable when done:
+networksetup -setsocksfirewallproxystate "Wi-Fi" off</pre>
+    </details>
+  </div>
+
+  <div class="row">
+    <span class="stat">Uptime: <strong id="stat-uptime">0s</strong></span>
+    <span class="stat">Tunnel connections handled: <strong id="stat-conn">0</strong></span>
+    <span class="stat">Events captured: <strong id="stat-events">0</strong></span>
+  </div>
+
+  <div class="row">
+    <button id="smoke" class="secondary">Run quick smoke test</button>
+    <button id="disconnect" class="warn">Disconnect</button>
+    <span id="smoke-result"></span>
+  </div>
+
+  <div style="display: flex; align-items: baseline; justify-content: space-between; margin-top: 1.8em;">
+    <h2 style="margin: 0; border: none; padding: 0;">3. Live tunnel activity</h2>
+    <div style="display: flex; gap: 0.5em;">
+      <button id="copy-log" class="secondary" style="padding: 0.35em 1em; font-size: 0.85em;">Copy log</button>
+      <button id="clear-log" class="secondary" style="padding: 0.35em 1em; font-size: 0.85em;">Clear view</button>
+    </div>
+  </div>
+  <p style="color: #666; font-size: 0.92em;">
+    Each connection your browser opens through the SOCKS5 proxy lands here. Targets are the
+    real hostnames each request goes to. Copy log = grab the whole feed in plain text
+    (paste into chat to share timing).
+  </p>
+  <div class="activity" id="activity">
+    <div class="empty">No activity yet. Configure your browser proxy and load a page.</div>
+  </div>
+</div>
+
+<div class="footer">
+  Listens on loopback only. Pasted config lives in memory + a 0o600 tempfile briefly during schema
+  validation, then unlinked. Nothing is uploaded by the playground itself.
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let lastActivityID = 0;
+let pollTimer = null;
+let connected = false;
+// Full activity history (not just what's visible). Cleared on disconnect
+// or when user clicks "Clear view". "Copy log" pulls from this so
+// scrolled-out entries are included.
+let activityHistory = [];
+
+$('config').addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    if (!connected) doConnect();
+  }
+});
+
+$('connect').onclick = doConnect;
+$('disconnect').onclick = doDisconnect;
+$('smoke').onclick = doSmoke;
+$('launch-browser').onclick = doLaunchBrowser;
+$('copy-log').onclick = doCopyLog;
+$('clear-log').onclick = doClearLog;
+
+// Enter inside the launch-url field triggers the launch.
+$('launch-url').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); doLaunchBrowser(); }
+});
+
+async function doConnect() {
+  const cfgText = $('config').value.trim();
+  if (!cfgText) { $('status').textContent = '⚠ paste a JSON config first'; return; }
+  $('status').textContent = 'connecting…';
+  $('connect-result').innerHTML = '';
+  $('connect').disabled = true;
+  try {
+    const r = await fetch('/api/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: cfgText }),
+    });
+    const data = await r.json();
+    renderSteps(data.steps || [], $('connect-result'));
+    if (data.ok) {
+      onConnected(data);
+    } else {
+      $('status').textContent = '✗ ' + (data.error || 'failed');
+      $('connect').disabled = false;
+    }
+  } catch (e) {
+    $('status').textContent = '✗ request error: ' + e.message;
+    $('connect').disabled = false;
+  }
+}
+
+function onConnected(data) {
+  connected = true;
+  $('status').textContent = '✓ connected as ' + data.client_id + ' via ' + data.transport_type;
+  $('socks-addr').textContent = data.socks_addr;
+  $('mac-cmd').textContent =
+    'networksetup -setsocksfirewallproxy "Wi-Fi" 127.0.0.1 ' + portOf(data.socks_addr) + '\n' +
+    '# disable when done:\n' +
+    'networksetup -setsocksfirewallproxystate "Wi-Fi" off';
+  $('section-proxy').classList.remove('hidden');
+  $('config').disabled = true;
+  startPolling();
+}
+
+async function doDisconnect() {
+  $('disconnect').disabled = true;
+  $('status').textContent = 'disconnecting…';
+  try {
+    const r = await fetch('/api/disconnect', { method: 'POST' });
+    const data = await r.json();
+    stopPolling();
+    connected = false;
+    $('section-proxy').classList.add('hidden');
+    $('config').disabled = false;
+    $('connect').disabled = false;
+    $('connect-result').innerHTML = '';
+    $('smoke-result').textContent = '';
+    $('activity').innerHTML = '<div class="empty">No activity yet. Configure your browser proxy and load a page.</div>';
+    lastActivityID = 0;
+    activityHistory = [];
+    $('status').textContent = `idle — last session handled ${data.connections_handled} tunnel connection(s)`;
+  } catch (e) {
+    $('status').textContent = '✗ disconnect error: ' + e.message;
+  } finally {
+    $('disconnect').disabled = false;
+  }
+}
+
+async function doSmoke() {
+  $('smoke').disabled = true;
+  $('smoke-result').textContent = 'running…';
+  try {
+    const r = await fetch('/api/smoke', { method: 'POST' });
+    const data = await r.json();
+    if (data.ok) {
+      $('smoke-result').textContent = `✓ http=${data.http_code} egress=${data.egress_ip} in ${data.elapsed_ms}ms`;
+      $('smoke-result').style.color = '#1a7';
+    } else {
+      $('smoke-result').textContent = '✗ ' + (data.error || 'failed');
+      $('smoke-result').style.color = '#c33';
+    }
+  } catch (e) {
+    $('smoke-result').textContent = '✗ ' + e.message;
+    $('smoke-result').style.color = '#c33';
+  } finally {
+    $('smoke').disabled = false;
+  }
+}
+
+async function doLaunchBrowser() {
+  const url = $('launch-url').value.trim();
+  $('launch-browser').disabled = true;
+  $('launch-result').textContent = 'launching…';
+  $('launch-result').style.color = '#666';
+  try {
+    const r = await fetch('/api/launch-browser', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await r.json();
+    if (data.ok) {
+      $('launch-result').textContent = `✓ ${data.browser} window opened (pid ${data.pid})`;
+      $('launch-result').style.color = '#1a7';
+    } else {
+      $('launch-result').textContent = '✗ ' + (data.error || 'failed');
+      $('launch-result').style.color = '#c33';
+    }
+  } catch (e) {
+    $('launch-result').textContent = '✗ ' + e.message;
+    $('launch-result').style.color = '#c33';
+  } finally {
+    $('launch-browser').disabled = false;
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(pollOnce, 1000);
+  pollOnce();
+}
+function stopPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+async function pollOnce() {
+  try {
+    const [statusR, actR] = await Promise.all([
+      fetch('/api/status'),
+      fetch('/api/activity?since=' + lastActivityID),
+    ]);
+    const status = await statusR.json();
+    const act = await actR.json();
+    if (!status.connected) {
+      stopPolling();
+      return;
+    }
+    $('stat-uptime').textContent = formatUptime(status.uptime_sec || 0);
+    $('stat-conn').textContent = status.connections_handled || 0;
+    $('stat-events').textContent = status.activity_events || 0;
+    if (act.entries && act.entries.length > 0) {
+      renderActivity(act.entries);
+      lastActivityID = act.entries[act.entries.length - 1].id;
+    }
+  } catch (e) {
+    /* swallow — playground might have stopped */
+  }
+}
+
+function renderSteps(steps, container) {
+  container.innerHTML = '';
+  for (const step of steps) {
+    const el = document.createElement('div');
+    el.className = 'step ' + (step.ok ? 'ok' : 'fail');
+    const elapsed = (typeof step.elapsed_ms === 'number' && step.elapsed_ms > 0)
+      ? `<span class="elapsed">${step.elapsed_ms} ms</span>` : '';
+    const mark = step.ok ? '✓' : '✗';
+    let html = `${elapsed}<span class="mark">${mark}</span><span class="name">${escapeHTML(step.name)}</span>`;
+    if (step.detail) html += `<div class="detail">${escapeHTML(step.detail)}</div>`;
+    el.innerHTML = html;
+    container.appendChild(el);
+  }
+}
+
+function renderActivity(entries) {
+  const box = $('activity');
+  if (box.querySelector('.empty')) box.innerHTML = '';
+  for (const e of entries) {
+    activityHistory.push(e);
+    const div = document.createElement('div');
+    div.className = 'entry kind-' + e.kind;
+    const t = new Date(e.time).toLocaleTimeString();
+    const target = e.target ? `<span class="target">${escapeHTML(e.target)}</span>` : '';
+    const err = e.error ? ` <span style="color:#c33">err=${escapeHTML(e.error)}</span>` : '';
+    div.innerHTML = `<span class="ts">${t}</span>${escapeHTML(e.kind)} · ${escapeHTML(e.message)} ${target}${err}`;
+    box.appendChild(div);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+// formatLog turns the activityHistory into plain-text suitable for pasting
+// into a chat. Includes wall-clock time + elapsed-since-first so the
+// recipient can see both absolute timestamps AND page-load duration at a
+// glance.
+function formatLog() {
+  if (activityHistory.length === 0) {
+    return '(no activity captured yet)';
+  }
+  const first = new Date(activityHistory[0].time).getTime();
+  const lines = ['# BeaconGate tunnel activity'];
+  // Header includes the tunnel context if we still know it.
+  const socks = $('socks-addr').textContent || '';
+  if (socks && socks !== '—') {
+    lines.push('# SOCKS5 proxy: ' + socks);
+  }
+  lines.push('# format: HH:MM:SS.mmm  +elapsed  kind  message  target  [error]');
+  lines.push('# total events: ' + activityHistory.length);
+  for (const e of activityHistory) {
+    const d = new Date(e.time);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    const ms = String(d.getMilliseconds()).padStart(3, '0');
+    const elapsedMs = d.getTime() - first;
+    const elapsed = (elapsedMs / 1000).toFixed(3) + 's';
+    let line = `${hh}:${mm}:${ss}.${ms}  +${elapsed.padStart(8)}  ${e.kind.padEnd(5)}  ${e.message}`;
+    if (e.target) line += '  ' + e.target;
+    if (e.error) line += '  err=' + e.error;
+    lines.push(line);
+  }
+  // Footer: total span
+  const last = new Date(activityHistory[activityHistory.length - 1].time).getTime();
+  const span = ((last - first) / 1000).toFixed(2);
+  lines.push('# total span: ' + span + 's');
+  // Unique targets count — useful summary signal
+  const targets = new Set(activityHistory.filter(e => e.target).map(e => e.target));
+  lines.push('# unique targets: ' + targets.size);
+  return lines.join('\n');
+}
+
+async function doCopyLog() {
+  const text = formatLog();
+  try {
+    await navigator.clipboard.writeText(text);
+    const btn = $('copy-log');
+    const orig = btn.textContent;
+    btn.textContent = `Copied ${activityHistory.length} entries`;
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  } catch (e) {
+    alert('clipboard write failed: ' + e.message + '\n\n--- log ---\n' + text);
+  }
+}
+
+function doClearLog() {
+  activityHistory = [];
+  $('activity').innerHTML = '<div class="empty">Cleared. Next request through the tunnel will appear here.</div>';
+}
+
+function copyText(elId) {
+  const t = $(elId).textContent;
+  navigator.clipboard.writeText(t).then(() => {
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  });
+}
+
+function portOf(addr) {
+  const i = addr.lastIndexOf(':');
+  return i < 0 ? addr : addr.slice(i + 1);
+}
+
+function formatUptime(sec) {
+  if (sec < 60) return sec + 's';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's';
+  return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm';
+}
+
+function escapeHTML(s) {
+  const e = document.createElement('div');
+  e.textContent = s == null ? '' : String(s);
+  return e.innerHTML;
+}
+
+// Restore state if server already has an active tunnel (e.g. on page reload)
+(async () => {
+  try {
+    const r = await fetch('/api/status');
+    const s = await r.json();
+    if (s.connected) {
+      onConnected({
+        client_id: s.client_id,
+        transport_type: s.transport_type,
+        socks_addr: s.socks_addr,
+      });
+      $('config').value = '(existing connection — disconnect to paste a new config)';
+    }
+  } catch {}
+})();
+</script>
