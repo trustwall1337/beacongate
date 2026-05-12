@@ -130,6 +130,12 @@ func (s *Server) ListenAndServe(addr string) error {
 }
 
 func (s *Server) Serve(l net.Listener) error {
+	// Wrap every accepted conn with NoDelay + QUICKACK so small TLS
+	// handshake records and SOCKS-negotiation replies don't pay the
+	// kernel's 40 ms Nagle / delayed-ACK tax on the local browser→tunnel
+	// hop. The wrap is idempotent — re-Serving an already-wrapped
+	// listener is harmless, the inner conns just get the option set twice.
+	l = &noDelayListener{Listener: l}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()

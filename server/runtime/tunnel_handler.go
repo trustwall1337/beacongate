@@ -455,8 +455,12 @@ func (s *Server) handleReset(clientID string, m protocol.Message) {
 // pending buffer. It exits when the upstream is closed or errored. After
 // each read, it notifies the per-client signal so any in-flight long-poll
 // can wake up and ship the bytes immediately.
+//
+// Buffer is 256 KiB to amortize syscalls on bulk-streaming upstreams
+// (YouTube CDN video chunks, large file downloads). One buffer per live
+// session, heap-allocated; total memory is bounded by maxSessionsPerClient.
 func (s *Server) readUpstream(ss *serverSession) {
-	buf := make([]byte, 16*1024)
+	buf := make([]byte, 256*1024)
 	for {
 		n, err := ss.conn.Read(buf)
 		if n > 0 {

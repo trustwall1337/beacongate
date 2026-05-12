@@ -30,8 +30,19 @@ const (
 	// It needs to be larger than defaultIdleHold so a server-side long-poll
 	// has room to complete naturally.
 	defaultActiveTimeout = 35 * time.Second
-	defaultInboxCapacity = 64
-	defaultMaxChunk      = 16 * 1024
+	// defaultInboxCapacity bounds the per-session in-flight chunk count.
+	// With 256 KiB chunks (defaultMaxChunk) this gives ~4 MiB of buffered
+	// downstream data per session before back-pressure kicks in — enough
+	// to absorb a YouTube CDN burst across one Apps Script round-trip
+	// without dropping bytes back to the server's pending queue, while
+	// keeping per-session memory bounded under load.
+	defaultInboxCapacity = 16
+	// defaultMaxChunk caps each DATA frame's payload. 256 KiB matches the
+	// server-side readUpstream buffer + defaultMaxChunk so one syscall =
+	// one frame on bulk streams. 16× fewer frames per MB of video means
+	// 16× less seq-number bookkeeping, JSON envelope overhead, and AEAD
+	// nonce traffic vs the historical 16 KiB cap.
+	defaultMaxChunk = 256 * 1024
 	// defaultCoalesceWindow batches outbound frames that arrive within
 	// this window into a single POST. Curl's TLS Finished and the
 	// HTTP request that follows are typically <1 ms apart; without
@@ -44,33 +55,46 @@ const (
 	defaultCoalesceWindow = 5 * time.Millisecond
 )
 
-// Pump drives the client transport. It splits work between two
-// goroutines:
+// Pump drives the client transport. It runs FOUR goroutines:
 //
-//   - The outbound worker fires HTTP POSTs that carry session traffic
-//     (OPEN/DATA/CLOSE/RESET). When the outbox is empty, it parks on
-//     the flush channel — it does NOT issue idle long-polls, so it
-//     can fire a new outbound POST the instant traffic arrives.
-//   - The idle worker keeps a single PROBE long-poll standing at the
-//     server whenever there are live sessions. It is the receive-side
-//     pipe for upstream-originated bytes that arrive *between* outbound
-//     POSTs (e.g. late TLS handshake responses, or any push from the
-//     upstream while the outbound worker is parked).
+//   - Two outbound workers fire HTTP POSTs that carry session traffic
+//     (OPEN/DATA/CLOSE/RESET). When the outbox is empty, each parks on
+//     the shared flush channel — neither issues idle long-polls, so a
+//     freshly-enqueued frame fires its POST without waiting for any
+//     standing PROBE to return. Two workers let parallel session
+//     handshakes (e.g. YouTube's ~8 concurrent CDN hosts) post their
+//     ClientHellos in parallel rather than serializing through one
+//     Apps Script round-trip (~2 s overhead each).
+//   - Two idle workers each keep a PROBE long-poll standing at the
+//     server whenever there are live sessions. They are the receive-
+//     side pipe for upstream-originated bytes that arrive *between*
+//     outbound POSTs. Two concurrent long-polls = effectively
+//     continuous pickup for bursty downloads (CDN video chunks, large
+//     responses) since one polls while the other is short-circuiting
+//     on data.
 //
-// Why split: with one in-flight request, every TLS handshake leg
-// serializes through one Apps Script round-trip (~2 s overhead each)
-// and a non-responsive leg (e.g. TLS 1.3 client Finished) stalls the
-// active-drain ceiling. Two concurrent POSTs let the outbound POST
-// return as soon as its drain window expires — the upstream's eventual
-// reply is picked up by the idle worker's standing long-poll without
-// waiting for the next outbound. See server/runtime: defaultActive
-// DrainWindow comment for the matching server-side rationale.
+// Why split outbound from idle: with one in-flight request, every TLS
+// handshake leg serializes through one Apps Script round-trip and a
+// non-responsive leg (e.g. TLS 1.3 client Finished) stalls the active-
+// drain ceiling. Concurrent POSTs let the outbound POST return as
+// soon as its drain window expires — the upstream's eventual reply is
+// picked up by an idle worker's standing long-poll without waiting
+// for the next outbound. See server/runtime: defaultActiveDrainWindow
+// for the matching server-side rationale.
+//
+// Channel capacities: flush and flushIdle are cap-2 so a single
+// signalFlush call (which is non-blocking) can wake both outbound
+// workers in turn — without this, signalFlush would deliver to
+// exactly one parked worker per call.
 //
 // Ordering: the server's drainAllForClient is atomic per-client, so
 // each upstream chunk is delivered exactly once via exactly one POST.
-// Apps Script per-call latency variance can still let two POSTs return
-// out-of-order on the wire — handled by per-session receive-side seq
-// reordering in deliverData.
+// Apps Script per-call latency variance + multiple workers can let
+// posts return out-of-order on the wire — handled by per-session
+// receive-side seq reordering in deliverData. OPEN-before-DATA-for-
+// the-same-session is preserved by the OPEN/DATA fusion path (Dial
+// queues OPEN without flushing; first Write coalesces both into one
+// batch).
 type Pump struct {
 	rt       *Runtime
 	idleHold time.Duration
@@ -133,8 +157,8 @@ func NewPump(rt *Runtime) *Pump {
 		idleHold:       defaultIdleHold,
 		inboxCap:       defaultInboxCapacity,
 		sessions:       map[string]*ClientSession{},
-		flush:          make(chan struct{}, 1),
-		flushIdle:      make(chan struct{}, 1),
+		flush:          make(chan struct{}, 2),
+		flushIdle:      make(chan struct{}, 2),
 		stop:           make(chan struct{}),
 		stopped:        make(chan struct{}),
 		coalesceWindow: defaultCoalesceWindow,
@@ -298,18 +322,39 @@ func (p *Pump) reconnectBackoff() time.Duration {
 	return d
 }
 
+// openFuseFallback is the safety-timer window for OPEN-with-no-first-Write.
+// If a SOCKS client connects but doesn't write within this window (server-
+// talks-first protocols like SMTP/IMAP greetings), OPEN ships alone so the
+// server can dial the upstream and start draining its greeting back.
+//
+// Well above curl's typical ClientHello generation (~10–30 ms on warm
+// code paths) and any reasonable browser's. Well below human-perceptible
+// connect latency. Trade-off well-explored: a previous 50 ms attempt was
+// too short for curl-with-TLS, leaving the server dialing into silence;
+// 150 ms is the safe upper bound while still capping the connect-then-
+// idle case.
+const openFuseFallback = 150 * time.Millisecond
+
 // Dial opens a new session against target. The returned ClientSession can be
 // used as a bidirectional byte stream until Close.
+//
+// OPEN is queued into the outbox but NOT flushed. The session is marked
+// openPending; the first Write fuses OPEN+DATA into one POST, which keeps
+// the freshly-dialed upstream TCP socket from sitting silent (and being
+// reaped by aggressive edges like YouTube's TCP frontend). If no Write
+// arrives within openFuseFallback, the safety timer ships OPEN alone so
+// server-talks-first protocols still progress.
 func (p *Pump) Dial(target protocol.Target) (*ClientSession, error) {
 	id, err := p.rt.NewID("sess")
 	if err != nil {
 		return nil, err
 	}
 	s := &ClientSession{
-		id:     id,
-		pump:   p,
-		inbox:  make(chan []byte, p.inboxCap),
-		closed: make(chan struct{}),
+		id:          id,
+		pump:        p,
+		inbox:       make(chan []byte, p.inboxCap),
+		closed:      make(chan struct{}),
+		openPending: true,
 	}
 	p.mu.Lock()
 	p.sessions[id] = s
@@ -319,22 +364,24 @@ func (p *Pump) Dial(target protocol.Target) (*ClientSession, error) {
 		Target:    &target,
 	})
 	p.mu.Unlock()
-	// Flush OPEN immediately. We previously tried buffering OPEN for
-	// 50 ms hoping the SOCKS layer's first Write would coalesce
-	// OPEN+DATA into one POST, but real-world testing showed that
-	// curl-with-TLS often takes longer than 50 ms to generate its
-	// first ClientHello — the safety timer then ships OPEN alone,
-	// the server dials the upstream, and the upstream's TLS server
-	// (e.g. api.ipify.org) closes the idle TCP connection at its own
-	// timeout (~15 s) before DATA ever arrives. The latency win this
-	// buffer was meant to capture is delivered more robustly by the
-	// server-side active-drain window (see SetActiveDrainWindow), so
-	// keep this path simple and ship OPEN as soon as it is queued.
-	p.signalFlush()
+	s.openTimer = time.AfterFunc(openFuseFallback, s.fallbackFlushOpen)
 	p.rt.Log().Info("session.open",
 		"session_id", id,
 		"target", net.JoinHostPort(target.Host, fmt.Sprintf("%d", target.Port)))
 	return s, nil
+}
+
+// fallbackFlushOpen ships an unfused OPEN when no Write arrived within
+// openFuseFallback. Cleared by the first Write (or Close) racing it.
+func (s *ClientSession) fallbackFlushOpen() {
+	s.mu.Lock()
+	if !s.openPending {
+		s.mu.Unlock()
+		return
+	}
+	s.openPending = false
+	s.mu.Unlock()
+	s.pump.signalFlush()
 }
 
 // signalFlush wakes the outbound worker so a freshly-enqueued frame
@@ -426,18 +473,35 @@ func (p *Pump) removeSession(id string) {
 	p.mu.Unlock()
 }
 
+// numOutboundWorkers and numIdleWorkers control parallelism for outbound
+// POSTs and standing idle long-polls respectively. Two of each is the
+// sweet spot for Apps Script: outbound lets parallel session handshakes
+// (YouTube's CDN host fan-out) fire concurrent POSTs; idle gives
+// continuous pickup coverage for upstream-pushed bytes that arrive
+// between active POSTs. Two idle long-polls at 8 s/poll ≈ 1 poll per 4 s
+// steady state ≈ 22 K polls/day — at the per-account quota ceiling but
+// not over. If quota pressure shows up under real load, drop idle to 1.
+const (
+	numOutboundWorkers = 2
+	numIdleWorkers     = 2
+)
+
 func (p *Pump) loop() {
 	defer close(p.stopped)
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		p.outboundLoop()
-	}()
-	go func() {
-		defer wg.Done()
-		p.idleLoop()
-	}()
+	wg.Add(numOutboundWorkers + numIdleWorkers)
+	for i := 0; i < numOutboundWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			p.outboundLoop()
+		}()
+	}
+	for i := 0; i < numIdleWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			p.idleLoop()
+		}()
+	}
 	wg.Wait()
 }
 
@@ -798,6 +862,16 @@ type ClientSession struct {
 	remoteClosed bool
 	err          error
 
+	// openPending is true between Dial and the first action that flushes
+	// OPEN (first Write, the 150 ms safety timer, or Close). While true,
+	// OPEN sits in the Pump outbox WITHOUT a flush — guaranteeing that
+	// the first Write's DATA frame and the OPEN ship in one POST. This
+	// is the core of the YouTube fix: a fresh upstream TCP socket dialed
+	// on the server side does not sit silent waiting for the next round-
+	// trip to deliver the TLS ClientHello.
+	openPending bool
+	openTimer   *time.Timer
+
 	readBuf []byte
 
 	// Receive-side reordering state. With concurrent POSTs (outbound
@@ -861,6 +935,17 @@ func (s *ClientSession) Write(b []byte) (int, error) {
 		s.mu.Unlock()
 		return 0, err
 	}
+	// Fuse OPEN with this first DATA frame. By cancelling the safety
+	// timer and clearing openPending here, the subsequent pump.enqueue
+	// below sees OPEN already in the outbox and the 5 ms coalesce window
+	// will drain OPEN+DATA into a single POST body. Subsequent Writes
+	// take a no-op fast path since openPending is already false.
+	if s.openPending {
+		s.openPending = false
+		if s.openTimer != nil {
+			s.openTimer.Stop()
+		}
+	}
 	s.mu.Unlock()
 
 	written := 0
@@ -912,6 +997,19 @@ func (s *ClientSession) Close() error {
 	}
 	s.localClosed = true
 	terminate := s.remoteClosed
+	// If the session never wrote, OPEN is still pending in the outbox.
+	// Stop the safety timer and let the CLOSE-enqueue below carry both
+	// OPEN and CLOSE in one POST — the server then dials, immediately
+	// observes CLOSE, and tears down. Without this, the timer would
+	// eventually fire and ship OPEN alone, then the CLOSE would land
+	// on the next POST — wasted round-trip and a transiently-orphaned
+	// upstream socket.
+	if s.openPending {
+		s.openPending = false
+		if s.openTimer != nil {
+			s.openTimer.Stop()
+		}
+	}
 	s.mu.Unlock()
 	s.pump.enqueue(protocol.Message{Type: protocol.MessageTypeClose, SessionID: s.id})
 	if terminate {

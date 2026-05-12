@@ -82,6 +82,11 @@ type contextDialer interface {
 // When ProxyDialer is set, the (resolved, safety-checked) hostport is
 // dialed through the SOCKS5 proxy rather than directly. SSRF runs
 // locally either way.
+//
+// The returned connection has Nagle's algorithm disabled and TCP keepalive
+// armed. Nagle adds up to 40 ms of kernel buffering per write batch, which
+// directly inflates TLS handshake-record latency; keepalive prevents NAT
+// or upstream-edge silent reaper kills on long-lived idle sessions.
 func (d *NetDialer) Dial(ctx context.Context, host string, port uint16) (net.Conn, error) {
 	ip, err := d.resolve(ctx, host)
 	if err != nil {
@@ -91,17 +96,39 @@ func (d *NetDialer) Dial(ctx context.Context, host string, port uint16) (net.Con
 		return nil, err
 	}
 	hostport := net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
-	if d.ProxyDialer != nil {
+	var conn net.Conn
+	switch {
+	case d.ProxyDialer != nil:
 		if cd, ok := d.ProxyDialer.(contextDialer); ok {
-			return cd.DialContext(ctx, "tcp", hostport)
+			conn, err = cd.DialContext(ctx, "tcp", hostport)
+		} else {
+			conn, err = d.ProxyDialer.Dial("tcp", hostport)
 		}
-		return d.ProxyDialer.Dial("tcp", hostport)
+	default:
+		dialer := d.DefaultDialer
+		if d.DialTimeout > 0 && dialer.Timeout == 0 {
+			dialer.Timeout = d.DialTimeout
+		}
+		conn, err = dialer.DialContext(ctx, "tcp", hostport)
 	}
-	dialer := d.DefaultDialer
-	if d.DialTimeout > 0 && dialer.Timeout == 0 {
-		dialer.Timeout = d.DialTimeout
+	if err != nil {
+		return nil, err
 	}
-	return dialer.DialContext(ctx, "tcp", hostport)
+	tuneUpstream(conn)
+	return conn, nil
+}
+
+// tuneUpstream applies low-latency TCP settings to a freshly-dialed
+// upstream connection. SOCKS5 proxy wrappers sometimes return a non-
+// TCPConn; in that case we skip silently rather than fail the dial.
+func tuneUpstream(conn net.Conn) {
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	_ = tcp.SetNoDelay(true)
+	_ = tcp.SetKeepAlive(true)
+	_ = tcp.SetKeepAlivePeriod(30 * time.Second)
 }
 
 // resolve consults the DNS cache or, on miss, performs a single resolver

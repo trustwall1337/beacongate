@@ -8,9 +8,14 @@ import (
 )
 
 // CompressThreshold is the minimum payload size at which gzip compression
-// pays off. Below this, the gzip header (~20 bytes) costs more than it
-// saves; small DATA messages and all session-control messages stay raw.
-const CompressThreshold = 256
+// is even attempted. The historical 256-byte value attempted gzip on every
+// DATA frame above 256 bytes — but the dominant payload is TLS records,
+// which are encrypted random and never compress, so each attempt hit the
+// caller-side "compressed not smaller, discard" guard. Pure CPU/latency
+// waste on the hot path. 16 KiB keeps gzip available for the rare bulk-
+// plaintext DATA frame (where it might actually pay off) while skipping it
+// entirely for every TLS record under the typical 16 KiB record cap.
+const CompressThreshold = 16 * 1024
 
 // MaxDecompressedSize bounds gzip output to defend against decompression
 // bombs. 16 MiB is well above any sensible single-chunk size.

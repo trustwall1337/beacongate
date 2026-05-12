@@ -62,8 +62,13 @@ const (
 	// agree on cadence: 8s gives a fast inbound-channel cycle (low
 	// pickup latency for response data) at the cost of more Apps Script
 	// invocations under idle.
-	defaultLongPollWindow       = 8 * time.Second
-	defaultMaxChunk             = 16 * 1024
+	defaultLongPollWindow = 8 * time.Second
+	// defaultMaxChunk caps the size of each DATA message the server emits
+	// back to the client. 256 KiB matches the upstream read-buffer size in
+	// readUpstream so one syscall fills one DATA frame on bulk streams,
+	// collapsing what used to be 16 separate 16 KiB frames (each with its
+	// own seq number, envelope overhead, and AEAD nonce) into one.
+	defaultMaxChunk             = 256 * 1024
 	defaultMaxSessionsPerClient = 100
 	defaultIdleSessionTimeout   = 10 * time.Minute
 
