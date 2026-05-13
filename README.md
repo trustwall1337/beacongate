@@ -58,23 +58,18 @@ PRs especially welcome for:
 
 ## How it works
 
-```
-[ your apps ]  ←SOCKS5→  [ BeaconGate client ]  ←Apps Script tunnel→  [ BeaconGate server ]  ←TCP→  [ destinations ]
-                          (laptop or phone)        (looks like Google)    (your VPS)
-```
+Local apps point their SOCKS5 setting at the BeaconGate client. The
+client wraps each batch in an AES-256-GCM sealed envelope and posts it
+to a Google Apps Script web app deployed under your own Google
+account. The Apps Script forwards the bytes to your VPS, which
+decrypts, applies server-side outbound policy, dials the destination,
+and pipes the response back the same way. A network observer between
+you and Google sees what looks like Chrome making ordinary HTTPS
+requests to `script.google.com` — not the destination, not the
+plaintext, not the VPS's IP.
 
-Local apps point their SOCKS5 setting at the BeaconGate client (default
-`127.0.0.1:1080`). The client wraps each batch in an AES-256-GCM sealed
-envelope and POSTs it to a Google Apps Script web app deployed under
-your own Google account. The Apps Script forwards the bytes to your VPS,
-which decrypts, runs server-side outbound policy (no torrents, no SSRF,
-no metadata IPs), dials the destination, and pipes bytes back the same
-way.
-
-A network observer between you and Google sees what looks like Chrome
-making ordinary HTTPS requests to `script.google.com`. They see neither
-the destination, nor the plaintext, nor the BeaconGate server's IP. Full
-picture in [docs/architecture.md](docs/architecture.md).
+For the full picture (diagrams, glossary, end-to-end data flow), see
+[docs/architecture.md](docs/architecture.md).
 
 ---
 
