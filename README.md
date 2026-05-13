@@ -148,14 +148,9 @@ into the tunnel. No Termux, no manual SOCKS5 wiring on the phone.
    make android-build-image   # one-time, ~10 min
    make android-apk           # produces a release APK (~15 MB)
    ```
-2. Install on the phone via `adb`:
-   ```sh
-   adb install -r mobile/android/app/build/outputs/apk/release/app-arm64-v8a-release.apk
-   ```
-3. Transfer `alice.json` to the phone (Drive link or USB copy to
-   `Downloads/`).
-4. Open BeaconGate on the phone → import the JSON file → **Connect**,
-   then accept the system VPN dialog.
+2. Install the APK on the phone, then open BeaconGate.
+3. Import `alice.json` (Drive link or file picker) and tap **Connect**.
+   Accept the system VPN dialog the first time.
 
 Full build + install walkthrough in
 [mobile/android/README.md](mobile/android/README.md). For the legacy
@@ -362,6 +357,22 @@ make fuzz            # 30s fuzz against envelope decode + crypto Open
 make ci              # everything CI runs
 make android-apk     # release APK via Docker (no local SDK/NDK needed)
 ```
+
+---
+
+## Support this project
+
+If BeaconGate is useful to you, please ⭐ the repo on GitHub — it
+helps more people find the project. Issues and PRs are welcome; see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+PRs especially welcome for:
+
+- Additional transport implementations (WebSocket, QUIC, Cloudflare
+  Workers, Fastly Compute@Edge — anything that can carry opaque
+  encrypted batches).
+- iOS client (`mobile/ios/` is reserved).
+- Desktop wrapper (`desktop/` is reserved).
 
 ---
 
