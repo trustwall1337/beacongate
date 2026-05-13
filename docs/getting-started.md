@@ -402,10 +402,10 @@ MDM, F-Droid-only), the legacy Termux + SOCKS5-client path is in
   day**, resetting at midnight US/Pacific. A single light user is
   comfortable within the ceiling; multiple users or sustained polling
   workloads need additional Google accounts in `script_keys`.
-- **`coalesce_step_ms` should remain `0` (default).** Non-zero values
-  have been observed to interact badly with the production
-  active-drain window, causing SOCKS requests to time out. Re-evaluate
-  after the bug is closed.
+- **`coalesce_step_ms` is `0` by default.** Leave it there unless
+  you're hitting the per-account Apps Script quota; non-zero values
+  trade latency for ~80% fewer POSTs and are only worth turning on
+  for quota-bound deployments. See README §Configuration.
 - **No graceful key rotation.** The wire envelope is keyed off the
   server's master AEAD key (and per-client HKDF derivations of it).
   Rotating the master is a hard cut: every existing client config

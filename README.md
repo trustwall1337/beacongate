@@ -40,6 +40,22 @@ See [SECURITY.md](SECURITY.md) for the full residual-risk model.
 
 ---
 
+## Support this project
+
+If BeaconGate is useful to you, please ⭐ the repo on GitHub — it
+helps more people find the project. Issues and PRs are welcome; see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+PRs especially welcome for:
+
+- Additional transport implementations (WebSocket, QUIC, Cloudflare
+  Workers, Fastly Compute@Edge — anything that can carry opaque
+  encrypted batches).
+- iOS client (`mobile/ios/` is reserved).
+- Desktop wrapper (`desktop/` is reserved).
+
+---
+
 ## How it works
 
 ```
@@ -174,56 +190,87 @@ working end-to-end.
 
 ## Configuration
 
-Examples in this repo:
+The options below all live in the **client** config JSON — either the
+file `beacongate-admin add-client` produces, or your own
+`client_config.json` for a laptop client. The full shape is in
+[client_config.appsscript.example.json](client_config.appsscript.example.json)
+(`appsscript` mode) or [client_config.example.json](client_config.example.json)
+(`https` mode). Server-side fields are in
+[server_config.example.json](server_config.example.json).
 
-- [server_config.example.json](server_config.example.json)
-- [client_config.example.json](client_config.example.json) — `https` mode
-- [client_config.appsscript.example.json](client_config.appsscript.example.json) — `appsscript` mode
+### `script_keys` — Apps Script deployment IDs
 
-### `script_keys`
+`script_keys` lives under `transport.options` and lists the Google
+Apps Script deployments the client will route through. Use one entry
+per deployment; the client round-robins across them and fails over on
+per-deployment errors. Adding more entries from additional Google
+accounts extends the daily quota (see "Multiple deployments" below).
 
-Both shapes are accepted:
-
-```json
-"script_keys": [
-  {"id": "DEPLOYMENT_ID_1", "account": "alpha-account"},
-  {"id": "DEPLOYMENT_ID_2", "account": "beta-account"}
-]
-```
-
-```json
-"script_keys": "DEPLOYMENT_ID_1,DEPLOYMENT_ID_2"
-```
-
-Migrate older configs with `beacongate-admin migrate-config --file client_config.json`.
-
-### `coalesce_step_ms` (adaptive uplink coalescing)
-
-For interactive workloads (SSH, IRC, REST polling), the default fires
-one HTTP POST per outbound frame, which can drain a single Google
-account's daily quota fast. Setting `coalesce_step_ms` to a positive
-value batches outbound frames; trades latency for ~80% fewer POSTs.
+Two formats are accepted; prefer the array form:
 
 ```json
-{ "coalesce_step_ms": 30 }
+"transport": {
+  "type": "appsscript",
+  "options": {
+    "script_keys": [
+      {"id": "AKfyc...DEPLOYMENT_ID_1", "account": "alpha-account"},
+      {"id": "AKfyc...DEPLOYMENT_ID_2", "account": "beta-account"}
+    ]
+  }
+}
 ```
 
-- `0` (default) — off.
-- `20–40` — recommended starting range.
-- Max `200` — hard cap; values above hurt responsiveness.
+A legacy comma-separated string is still parsed for backward
+compatibility:
 
-### SOCKS5 username/password
+```json
+"script_keys": "AKfyc...DEPLOYMENT_ID_1,AKfyc...DEPLOYMENT_ID_2"
+```
 
-Empty username = no auth (default, safe for loopback). **Set
-`socks.username` and `socks.password` whenever you bind to a non-loopback
-address**, or anyone on the LAN can drain your quota.
+To migrate an older config in place:
+`beacongate-admin migrate-config --file client_config.json`.
+
+### `coalesce_step_ms` — adaptive uplink coalescing (optional)
+
+Top-level field in the client config. **Leave at `0` (the default)
+unless you're hitting the per-account Apps Script quota.** When set
+above zero, the pump waits this many milliseconds for additional
+outbound frames before firing a POST, batching interactive bursts
+(SSH typing, REST polling) into single requests. Trades latency for
+~80% fewer POSTs.
+
+```json
+{
+  "client_id": "alice",
+  "coalesce_step_ms": 0
+}
+```
+
+- `0` (default) — off, every TX fires immediately. Lowest latency.
+- `20–40` — opt-in for quota-bound deployments. `30` is a sensible
+  starting point.
+- `200` — hard cap. Values above hurt perceived responsiveness.
+
+### SOCKS5 username/password (optional)
+
+Top-level `socks` block in the client config. Empty username = no
+auth (default), which is safe when `listen_addr` is loopback. **Set
+both `socks.username` and `socks.password` whenever you bind to a
+non-loopback address**, otherwise anyone on the LAN can drain your
+quota.
 
 ```json
 {
   "listen_addr": "0.0.0.0:1080",
-  "socks": { "username": "alice", "password": "long-random-shared-secret" }
+  "socks": {
+    "username": "alice",
+    "password": "long-random-shared-secret"
+  }
 }
 ```
+
+Connect with
+`curl -x socks5://alice:long-random-shared-secret@host:1080 …`.
 
 ---
 
@@ -357,22 +404,6 @@ make fuzz            # 30s fuzz against envelope decode + crypto Open
 make ci              # everything CI runs
 make android-apk     # release APK via Docker (no local SDK/NDK needed)
 ```
-
----
-
-## Support this project
-
-If BeaconGate is useful to you, please ⭐ the repo on GitHub — it
-helps more people find the project. Issues and PRs are welcome; see
-[CONTRIBUTING.md](CONTRIBUTING.md).
-
-PRs especially welcome for:
-
-- Additional transport implementations (WebSocket, QUIC, Cloudflare
-  Workers, Fastly Compute@Edge — anything that can carry opaque
-  encrypted batches).
-- iOS client (`mobile/ios/` is reserved).
-- Desktop wrapper (`desktop/` is reserved).
 
 ---
 
