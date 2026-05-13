@@ -18,16 +18,17 @@ domain picks the language best suited to it:
 
 ```
 cmd/                     Go binaries
-engine/, client/, server/, test/   Go (the relay engine, phases 1 & 2)
-desktop/                 reserved for the desktop product (phase 3, language TBD)
-mobile/ios/, mobile/android/   reserved for mobile (phase 4)
+engine/, client/, server/, test/   Go (the relay engine)
+mobile/android/          Android native app (Kotlin, gomobile-bound Go core)
+mobile/ios/              reserved for iOS (language TBD)
+desktop/                 reserved for desktop (language TBD)
 protocol/                cross-language protocol spec / schemas
 ops/                     deployment assets (cross-cutting)
 docs/                    product docs (cross-cutting)
 tools/                   dev/build helpers (cross-cutting)
 ```
 
-When adding a new language subtree (desktop, mobile, etc.):
+When adding a new language subtree:
 
 1. Put the language toolchain config (`package.json`, `Cargo.toml`,
    `*.xcodeproj`, `build.gradle.kts`, …) at the **subtree root**, not at
@@ -78,11 +79,11 @@ Optional body explaining the why.
 
 `type` is one of `feat`, `fix`, `docs`, `refactor`, `test`, `chore`,
 `ops`, `security`. `scope` is the directory the change touches, e.g.
-`engine/protocol`, `server/runtime`, `desktop` (when it exists).
+`engine/protocol`, `server/runtime`, `android`.
 
 ## Submitting a pull request
 
-1. Branch from `main`.
+1. Branch from `master`.
 2. Run `make ci` locally; CI runs the same checks and will block on
    failures.
 3. PR description should include:

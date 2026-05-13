@@ -106,17 +106,15 @@ in Termux with NekoBox / v2rayNG.
 
 ### Added — v1.1.0 end-user-experience polish
 
-This batch is the "usable v1, not POC" workstream. Eight items
-shipped that close end-user-experience gaps so the friend on the
-phone using BeaconGate every day doesn't feel friction during
-setup or during sustained use.
+Eight items closing end-user-experience gaps so a non-technical user
+on a phone does not hit friction during setup or sustained use.
 
 - **`bg://` share-link + QR-code import** — operator runs
   `beacongate-admin export-link --config client.json --qr` (or
-  `--qr-png file.png`); friend pastes/scans and runs
+  `--qr-png file.png`); the user pastes/scans and runs
   `beacongate-client -import "<bg://...>"`. Setup goes from 10
   minutes of JSON editing to under 30 seconds. Sensitive-data
-  warning printed every export.
+  warning printed on every export.
 - **Multi-profile CLI** —
   `${XDG_CONFIG_HOME}/beacongate/profiles/<name>.json`.
   `beacongate-client -profile work` vs `-profile home`.
@@ -159,7 +157,7 @@ setup or during sustained use.
   signal at startup ("relay healthy, AES key matches end-to-end")
   instead of split-across-multiple-slog-events.
 
-### Honest deferrals (named so they don't slip)
+### Deferred to later releases
 
 - **`idle_slots_per_bucket` knob** — deferred to v1.2. Needs
   per-bucket worker pool (Pump-level concurrency refactor). v1.1.0's
@@ -208,11 +206,12 @@ setup or during sustained use.
   `migrate-config` rewrites string → array form.
 - **README rewrite** — operator-first structure. Tagline leads with
   the end-user property; "What this is NOT" consent block surfaces
-  the four residual risks BEFORE setup so end users in censored
-  countries can give informed consent. Adds Important Notes /
-  Disclaimer / Support sections. Includes the explicit "no local CA
-  cert ever" line clarifying BeaconGate is unlike MasterHttpRelayVPN-
-  style local-MITM designs.
+  the four residual risks BEFORE setup so end users can give
+  informed consent. Adds Important Notes / Disclaimer / Support
+  sections. Includes the explicit "no local CA cert ever" line:
+  BeaconGate tunnels raw TCP via SOCKS5, so the browser does TLS
+  end-to-end with the destination and BeaconGate never sees the
+  plaintext.
 
 ### Changed
 
@@ -262,7 +261,7 @@ setup or during sustained use.
   SOCKS, IPv4-only).
 - **`docs/operator-handoff-checklist.md`** — pre-flight before the
   operator sends a bundle (server reachable from a fresh network,
-  policy doesn't block the friend's destinations, SHA-256 logged
+  policy doesn't block the end user's destinations, SHA-256 logged
   out-of-band).
 - **`docs/troubleshooting.md`** — full operator runbook covering
   symptoms, first-response commands, AEAD key rotation, and per-
