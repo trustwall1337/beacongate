@@ -313,12 +313,24 @@ class BeaconVpnService : VpnService() {
     private fun applyTrafficScope(builder: Builder) {
         val scopeStore = TrafficScopeStore(applicationContext)
         if (!scopeStore.routeAllTraffic()) {
-            val selected = scopeStore.selectedPackages().toMutableSet()
-            // Always route BeaconGate itself; otherwise control/runtime calls
-            // may bypass the VPN app-scope and confuse startup behavior.
-            selected.add(packageName)
+            // **DO NOT** add `packageName` to the allowed list. BeaconGate
+            // itself MUST bypass the tunnel — its outbound HTTPS to
+            // script.google.com (the appsscript transport) is what powers
+            // the tunnel. If BeaconGate's traffic is captured by its own
+            // VpnService, every outbound packet from the transport hits
+            // the TUN device → tun2socks → SOCKS → transport (loops),
+            // and no batch ever reaches Apps Script. The "transport
+            // unhealthy: timeout" symptom on Android with no
+            // corresponding server-side traffic is exactly this
+            // deadlock.
+            //
+            // In app-scope mode, BeaconGate is implicitly excluded by
+            // virtue of NOT being in the allowed list — Android only
+            // routes UIDs we add. Nothing more is needed here.
+            val selected = scopeStore.selectedPackages()
             var allowedAdded = 0
             for (pkg in selected) {
+                if (pkg == packageName) continue // belt-and-suspenders
                 try {
                     builder.addAllowedApplication(pkg)
                     allowedAdded++
@@ -332,6 +344,15 @@ class BeaconVpnService : VpnService() {
             return
         }
         Log.i(TAG, "VPN all-traffic mode enabled")
+        // In all-traffic mode every UID's traffic is captured by default;
+        // exclude BeaconGate explicitly to avoid the same self-routing
+        // deadlock described above. Without this, the transport can
+        // never reach script.google.com.
+        try {
+            builder.addDisallowedApplication(packageName)
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not disallow BeaconGate self: ${t.message}")
+        }
         for (pkg in DISALLOWED_PACKAGES) {
             try {
                 builder.addDisallowedApplication(pkg)

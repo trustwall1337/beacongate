@@ -11,7 +11,12 @@ class TrafficScopeStore(context: Context) {
 
     private val prefs = context.getSharedPreferences(PREFS_FILE_NAME, Context.MODE_PRIVATE)
 
-    fun routeAllTraffic(): Boolean = prefs.getBoolean(KEY_ROUTE_ALL, false)
+    // Default to "route all apps" on a fresh install. Per-app
+    // selective routing is a v2 feature; for v1 we want friends to
+    // see "tap Connect → everything works." If a user explicitly
+    // toggles the switch off later, the false value is stored and
+    // honored on subsequent launches.
+    fun routeAllTraffic(): Boolean = prefs.getBoolean(KEY_ROUTE_ALL, true)
 
     fun setRouteAllTraffic(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_ROUTE_ALL, enabled).apply()
