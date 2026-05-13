@@ -16,20 +16,16 @@ apps point their proxy setting at the local BeaconGate process; their
 traffic travels encrypted to the remote BeaconGate process, which makes
 the real outbound TCP connection on their behalf.
 
-> **Transport status (v1.1, current):** two transports ship today.
-> `engine/transport/https` is a direct HTTPS POST to an
-> operator-configured URL — operator-controlled relay, NOT a
-> censorship-evasion path on its own. `engine/transport/appsscript`
-> tunnels every batch through a user-deployed Google Apps Script web
-> app, so the wire path terminates at a real Google IP with
-> `SNI=www.google.com` and HTTP `Host: script.google.com` — that is
-> the actual censorship-evasion property. The TLS handshake itself
-> is performed by [uTLS](https://github.com/refraction-networking/utls)
-> presenting a pinned Chrome 131 fingerprint, so a passive
-> JA3/JA4-fingerprinting observer sees what looks like a real Chrome
-> browser. The deployment-mode matrix in [deployment.md](deployment.md)
-> compares the two transports; [uTLS-fingerprint-cadence.md](uTLS-fingerprint-cadence.md)
-> documents the pin and bump policy.
+Two transports ship today. At a glance:
+
+| Mode | What it does | Use it when |
+| --- | --- | --- |
+| **`appsscript`** | Tunnels every batch through a user-deployed Google Apps Script web app. The wire path terminates at a real Google IP with `SNI=www.google.com` and HTTP `Host: script.google.com`. The TLS handshake itself is performed by [uTLS](https://github.com/refraction-networking/utls) presenting a pinned Chrome 131 fingerprint, so a passive JA3/JA4-fingerprinting observer sees what looks like a real Chrome browser. | You need traffic that looks like ordinary Google traffic to a network observer. **This is the censorship-evasion path.** |
+| `https` | Direct HTTPS POST to an operator-configured URL. Generic HTTPS, **NOT a censorship-evasion path on its own** — a network observer sees TLS to your relay's hostname. | You operate your own relay behind a CDN / your own domain fronting, or you don't need on-path-censor evasion. |
+
+The deployment-mode matrix in [deployment.md](deployment.md) compares
+the two playbooks. [uTLS-fingerprint-cadence.md](uTLS-fingerprint-cadence.md)
+documents the pin and bump policy.
 
 ---
 

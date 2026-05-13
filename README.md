@@ -73,15 +73,6 @@ For the full picture (diagrams, glossary, end-to-end data flow), see
 
 ---
 
-## Transport modes
-
-| Mode | What it does | Use it when |
-| --- | --- | --- |
-| **`appsscript`** | Tunnels every batch through a user-deployed Google Apps Script web app. Wire path terminates at a real Google IP with `SNI=www.google.com` (uTLS-fingerprinted as Chrome 131) and HTTP `Host: script.google.com`. | You need traffic that looks like ordinary Google traffic to a network observer. **This is the censorship-evasion path.** |
-| `https` | Direct HTTPS POST to an operator-configured URL. Generic HTTPS, **NOT a censorship-evasion path on its own**. | You operate your own relay behind a CDN / your own domain fronting, or you don't need on-path-censor evasion. |
-
----
-
 ## Setup
 
 A working tunnel has four moving parts. Each section is independent —
