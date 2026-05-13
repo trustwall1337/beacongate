@@ -6,7 +6,80 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once it reaches `1.0.0`.
 
-## [Unreleased] — v1.1.1
+## [1.2.0] — 2026-05-13
+
+### Added — native Android client
+
+- **`mobile/android/`** — native Android system-VPN app. Captures all
+  phone traffic into a TUN device, routes through tun2socks → the
+  embedded Go client → the BeaconGate tunnel. Replaces the Phase 1
+  Termux + NekoBox/v2rayNG handoff for the typical operator-to-user
+  flow; Termux is preserved as a documented fallback.
+- **`mobile/bindings/`** — gomobile-bind facade
+  (`ImportConfig`, `StartTunnel`, `StopTunnel`, `Status`, `GetStats`,
+  `Version`, `SetLogSink`) exposed to Kotlin.
+- **Dockerized Android build** — `make android-build-image` /
+  `make android-apk` / `make android-apk-debug` produce a release or
+  debug-signed APK without requiring a local Android SDK/NDK on the
+  operator's host.
+- **Per-user `add-client` flow** — `beacongate-admin add-client`
+  emits a ready-to-import per-user JSON config (independent
+  HKDF-derived master key per user). Replaces the
+  manual-config-editing path for handoff.
+
+### Added — performance and reliability
+
+- **OPEN+DATA fusion + tuned worker pool** — the client fuses session
+  OPEN and the first DATA frame into a single batch, and the outbound
+  worker pool was tuned (2 → 4 → back to 2 after measurement). End
+  result: YouTube and similarly bandwidth-sensitive sites unblocked
+  through the appsscript transport.
+- **TCP_NODELAY on the tunnel hot path** — eliminates Nagle's-algorithm
+  stalls in the small-frame regime that dominates SOCKS5 setup.
+- **Out-of-order inbound DATA reassembly** — server-side ring buffer
+  rejoins frames that arrive ahead of their predecessor instead of
+  resetting the session.
+- **SOCKS5 UDP ASSOCIATE sizing for Chrome DNS-prefetch bursts** —
+  raise the per-listener associate cap (48 → 512), drop the idle TTL
+  (8s → 1.5s). Chrome's DNS-prefetch burst fires 50+ queries per page
+  load; the previous limits surfaced as "general SOCKS server failure"
+  cascades.
+
+### Fixed
+
+- **Android: BeaconGate excluded from its own VpnService.** Routing the
+  app's own UID through the TUN device caused the appsscript transport's
+  outbound HTTPS to `script.google.com` to be captured, looping the
+  tunnel through itself. Both app-scope and all-traffic modes now
+  exclude `packageName` explicitly. Default traffic-scope flipped to
+  *all apps* so first-launch is "tap Connect → everything works."
+- **`go-chi/chi/v5` bumped 5.2.1 → 5.2.2** for
+  [GO-2025-3770](https://pkg.go.dev/vuln/GO-2025-3770) (host-header
+  injection in `RedirectSlashes`).
+
+### Security
+
+- **Per-user revocable access via SealerRegistry** — server-side
+  allowlist of `client_id → HKDF-derived master key`. Revoking one
+  user invalidates only their config; the rest keep working.
+
+### Documentation
+
+- README rewritten: project summary → ⚠️ What this is NOT → Support
+  (⭐ ask) → How it works → Setup (categorized: Server / Apps Script
+  / Client config / Android primary, Laptop secondary) →
+  Configuration → … Drops the chat-flavored "your friend" framing,
+  the Iran timezone aside, and the MasterHttpRelayVPN comparison
+  that had drifted in from earlier drafts.
+- `docs/getting-started.md` rewritten around the native Android path
+  (892 → ~440 lines).
+- `docs/android-termux.md` trimmed and reframed as a legacy doc with
+  a "use the native app instead" banner.
+- Hygiene pass across CHANGELOG, CONTRIBUTING, subtree READMEs, and
+  the canonical `docs/*.md` set: chat-flavored language removed,
+  stale planning-doc cross-refs cleaned up.
+
+## [1.1.1] — 2026-05-09
 
 ### Performance — server-side response folding (active-drain window)
 
@@ -93,7 +166,7 @@ fanout.
   `Server.SetLongPollWindow` (the default has been 8 s since
   v1.1.0's 25 s → 8 s long-poll window change).
 
-## [Unreleased] — v1.1
+## [1.1.0] — 2026-05-09
 
 This release closes the censorship-evasion gap (the `appsscript` transport
 delivers traffic that looks like ordinary Google Apps Script traffic to a
@@ -413,5 +486,7 @@ in v1.2.
 - Three CLIs: `beacongate-client`, `beacongate-server`, `beacongate-admin`.
 - systemd unit, Dockerfile, docker-compose example.
 
-[Unreleased]: https://github.com/trustwall1337/beacongate/compare/v1.0...HEAD
+[1.2.0]: https://github.com/trustwall1337/beacongate/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/trustwall1337/beacongate/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/trustwall1337/beacongate/compare/v1.0...v1.1.0
 [v1.0]: https://github.com/trustwall1337/beacongate/releases/tag/v1.0
