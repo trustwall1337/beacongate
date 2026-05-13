@@ -118,13 +118,31 @@ sudo systemctl restart beacongate-server
 
 This appends `alice` to the server's allowlist and writes a ready-to-use
 JSON config containing the per-client key, the server URL, and the
-transport options. Copy that JSON file to whichever device will run the
-BeaconGate client.
+transport options. This JSON is what you hand to the end user — they
+import it into the BeaconGate app and they're done.
 
 > The JSON contains an AES key. Treat it like a password — transfer over
 > Signal, scp, or in person; never over plaintext channels.
 
-### 4. Client (laptop or phone)
+### 4. Client
+
+#### Android (native app)
+
+The Android app is a system VPN service that captures all phone traffic
+into the tunnel. No Termux, no manual SOCKS5 wiring on the phone.
+
+1. Build the release APK on your laptop:
+   ```sh
+   make android-build-image   # one-time, ~10 min
+   make android-apk           # produces a release APK (~15 MB)
+   ```
+2. Install the APK on the end user's phone, then open BeaconGate.
+3. Import `alice.json` (Drive link or file picker) and tap **Connect**.
+   Accept the system VPN dialog the first time.
+
+Full build + install walkthrough in
+[mobile/android/README.md](mobile/android/README.md). For the legacy
+Termux path, see [docs/android-termux.md](docs/android-termux.md).
 
 #### Laptop (macOS / Linux / Windows)
 
@@ -137,24 +155,6 @@ beacongate-client -config alice.json -control-addr 127.0.0.1:9091
 ```
 
 Point any SOCKS5-capable client at `127.0.0.1:1080`.
-
-#### Android (native app)
-
-The Android app is a system VPN service that captures all phone traffic
-into the tunnel. No Termux, no manual SOCKS5 wiring on the phone.
-
-1. Build the release APK on your laptop:
-   ```sh
-   make android-build-image   # one-time, ~10 min
-   make android-apk           # produces a release APK (~15 MB)
-   ```
-2. Install the APK on the phone, then open BeaconGate.
-3. Import `alice.json` (Drive link or file picker) and tap **Connect**.
-   Accept the system VPN dialog the first time.
-
-Full build + install walkthrough in
-[mobile/android/README.md](mobile/android/README.md). For the legacy
-Termux path, see [docs/android-termux.md](docs/android-termux.md).
 
 ---
 
