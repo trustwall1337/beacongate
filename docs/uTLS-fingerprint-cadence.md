@@ -110,10 +110,10 @@ In a v1.2.0 / v1.3.0 / etc. release branch:
 
 ## CI early-warning
 
-A future CI check (tracked as Phase 3+ work) will warn when our
-pinned profile is more than two Chrome majors behind uTLS's
-`HelloChrome_Auto`. The warning fires in CI as a non-blocking
-notice; the bump itself is still a deliberate human decision.
+A future CI check will warn when our pinned profile is more than two
+Chrome majors behind uTLS's `HelloChrome_Auto`. The warning fires in
+CI as a non-blocking notice; the bump itself remains a deliberate
+human decision.
 
 For now, the cadence is enforced by code review on each minor
 release: the release checklist (see `CONTRIBUTING.md`) includes

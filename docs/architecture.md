@@ -33,7 +33,7 @@ the real outbound TCP connection on their behalf.
 
 ---
 
-## 2. The naming gotcha (read this first)
+## 2. How we use "client" and "server" (read this first)
 
 Most networking guides use "client" and "server" to mean the two ends of
 a connection. **BeaconGate uses these words differently** and that's
@@ -243,14 +243,14 @@ cmd/                    Three Go binaries
 
 engine/                 Shared Go code used by BOTH client and server
   protocol/               Wire format: envelope, OPEN/DATA/CLOSE/RESET/PING/PROBE
-  crypto/                 AES-256-GCM authenticated encryption
-  session/                Session state machine
+  crypto/                 AES-256-GCM authenticated encryption + HKDF derivation
+  replay/                 Server-side replay store (per-client dedup + response cache)
   config/                 JSON config loader
   transport/              Abstraction for "how do encrypted batches travel?"
     https/                  Direct HTTPS POST transport — operator-controlled
                               relay, NOT a censorship-evasion path on its own.
     appsscript/             Apps-Script-tunneled transport — the actual
-                              censorship-evasion path (ships in v1.1).
+                              censorship-evasion path.
     transporttest/          httptest-style fakes for tests
 
 client/                 BeaconGate client-only code
@@ -266,8 +266,11 @@ server/                 BeaconGate server-only code
 
 test/integration/       Go end-to-end tests across all layers
 
-desktop/                (Phase 3, future) — not Go
-mobile/                 (Phase 4, future) — not Go
+desktop/                (reserved, not built) — not Go
+mobile/
+  android/                Native Android app (Kotlin + gomobile-bound Go core)
+  bindings/               gomobile facade (ImportConfig, StartTunnel, …)
+  ios/                    (reserved, not built)
 protocol/               Cross-language protocol home (schemas/IDL later)
 ops/                    Docker, systemd, baseline policy
 docs/                   This document and the others
@@ -332,8 +335,8 @@ A package's location tells you who can use it:
 | **Tunnel path** | The HTTP path the server listens on for encrypted batches. Default `/tunnel`, configurable. |
 | **Health path** | A simple `200 OK` endpoint for liveness checks. Default `/healthz`. |
 | **Admin API** | A separate HTTP listener (default `127.0.0.1:9090`) for managing policy at runtime. Loopback-only by default, optionally bearer-token-authenticated for remote use. |
-| **Control API** (client side) | Local-only HTTP API on the client (default `127.0.0.1:9091`). Phase 1 surface: `GET /api/status`, `GET /api/health`, `GET /api/diagnose`, `GET /api/events`, `POST /api/validate`. Lifecycle (connect/disconnect) and profile CRUD are deferred to a future desktop wrapper. |
-| **Profile** | A client config (server URL, key, transport options). Phase 1 uses a single config file passed via `-config`; a multi-profile abstraction is deferred to the future desktop wrapper. |
+| **Control API** (client side) | Local-only HTTP API on the client (default `127.0.0.1:9091`). Read endpoints: `GET /api/status`, `GET /api/health`, `GET /api/diagnose`, `GET /api/events`. Validation: `POST /api/validate`. Lifecycle (connect/disconnect) and profile CRUD are reserved for a future desktop wrapper. |
+| **Profile** | A client config (server URL, key, transport options). The CLI client takes a single config file via `-config`; a multi-profile abstraction is reserved for the future desktop wrapper. |
 
 ---
 
@@ -455,26 +458,30 @@ In this order:
 
 ---
 
-## 11. Future shape (not built yet)
+## 11. What's built today vs. reserved
 
-The Phase 1 deliverables (engine, both transports, minimal client
-control surface, Android-via-Termux operator handoff) are complete.
-Phase 2+ items, in rough order:
+Built and shipping:
+
+- The relay engine (`engine/*`), both transports (`https` and
+  `appsscript`), the CLI client and server, the admin CLI, and the
+  Docker / systemd deployment paths.
+- The native Android app (`mobile/android/`), which runs the same
+  Go core via `gomobile bind` and presents a system-VPN UI.
+
+Reserved subtrees (not built):
 
 - **Desktop product** ([../desktop/README.md](../desktop/README.md)) —
-  a UI that talks to the local control API. Language TBD (Tauri,
-  Electron, or native). Drives the missing STEP-2 endpoints
+  a UI that talks to the local control API. Language and packaging
+  open; would drive lifecycle endpoints
   (`POST /api/connect`, `POST /api/disconnect`, profile CRUD,
   `POST /api/profiles/{id}/validate`).
-- **Native mobile** ([../mobile/README.md](../mobile/README.md)) —
-  iOS and Android apps. The Phase 1 Android end-user experience uses
-  Termux + NekoBox/v2rayNG (see
-  [docs/android-termux.md](android-termux.md)); native apps are a
-  Phase 4 polish, not a precondition.
+- **iOS** ([../mobile/ios/README.md](../mobile/ios/README.md)) —
+  native iOS client. Architecture (gomobile bind vs. Swift port vs.
+  Network Extension) is open.
 - **Additional transports** — anything that can carry opaque
-  encrypted batches: WebSocket, QUIC, Cloudflare Worker, etc.
-  Each is a new package under `engine/transport/`.
+  encrypted batches: WebSocket, QUIC, Cloudflare Worker. Each is a
+  new package under `engine/transport/`.
 - **Operator observability beyond `journalctl`** — Prometheus
-  exporters, structured-log reference, dashboard templates. Phase 1
-  ships only the journal-based path because the Phase-1 deployment
-  shape is "one operator, one VPS."
+  exporters, structured-log reference, dashboard templates. Current
+  deployments use the journal-based path; a metrics surface is open
+  scope.

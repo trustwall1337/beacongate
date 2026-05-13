@@ -144,10 +144,10 @@ sudo cp /var/lib/beacongate/policy.2026-04-15.bak /var/lib/beacongate/policy.jso
 sudo systemctl restart beacongate-server
 ```
 
-`policy.json` is text, so `git diff` between backups is the cheapest
-audit trail you'll ever build. If your operations are remote/team-
-scaled, putting the file in a git repo and rsync'ing it onto the
-server is a perfectly reasonable Phase-1 workflow.
+`policy.json` is text, so `git diff` between backups is a cheap audit
+trail. For remote or team operations, putting the file in a git repo
+and rsync'ing it onto the server is a perfectly reasonable workflow
+before moving to the admin API.
 
 ## Local-admin vs token-auth admin
 
@@ -165,5 +165,5 @@ the same token in version control. If you suspect leakage, change
 `admin.token` and restart — every admin client must re-fetch the
 token out-of-band.
 
-For Phase 1 the recommended posture is loopback-only. Move to
-bearer-token only when a real second operator joins.
+Recommended default: loopback-only. Move to bearer-token only when a
+second operator joins or remote admin is genuinely needed.

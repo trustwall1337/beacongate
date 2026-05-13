@@ -1,107 +1,100 @@
 # Operator Handoff Checklist
 
-A pre-flight list for the BeaconGate operator before sending a bundle
-to a friend who will run it on Android.
+Pre-flight list for the BeaconGate operator before handing a config
+(and, optionally, a built APK) to an end user. Walk it top to bottom
+every time; if any check fails, fix it before sending.
 
-This is the single doc that says **"the bundle is ready."** Walk it
-top-to-bottom every time. If any check fails, fix it before sending.
-
-If you are the friend the operator is sending the bundle to, this
-isn't your doc — see [android-termux.md](android-termux.md) instead.
+The end-user-facing walkthrough is in
+[mobile/android/README.md](../mobile/android/README.md).
 
 ---
 
-## Before you build the bundle
+## Before you generate the config
 
-- [ ] **Server is running and healthy.**
-      Run from a *different* network than the server (your phone on
-      mobile data, or a VPS in another region):
+- [ ] **Server is running and healthy** — verified from a different
+      network than the server (e.g. your phone on mobile data, or a
+      VPS in another region):
       ```sh
       curl -fsS https://relay.your-domain.com/healthz   # https mode
-      # or for appsscript mode, hit your script's URL:
+      # or for appsscript mode, hit the script URL:
       curl -fsS https://script.google.com/macros/s/$DEPLOYMENT_ID/exec
       ```
-      Both should return `ok` or a JSON body. If a curl from your
-      laptop on the same network as the server works but a curl from
-      a different network does not, you have a firewall/DNS problem
-      to fix before handing the bundle over.
+      Both should return `ok` or a JSON body. If `curl` from the same
+      network as the server works but a different network does not,
+      fix the firewall / DNS issue before handing anything over.
 
-- [ ] **The friend's expected destinations are not blocked by policy.**
+- [ ] **The end user's expected destinations are not blocked by policy** —
+      from your own operator client pointed at the production server:
       ```sh
       curl -x socks5h://127.0.0.1:1080 -fsS https://news.example.com
       curl -x socks5h://127.0.0.1:1080 -fsS https://api.example.org
       ```
-      Run with the operator's own client pointed at the production
-      server. Hits a `RESET POLICY_DENIED`? Add an allow rule before
-      shipping. See [policy.md](policy.md) §"Adding a rule safely."
+      A `RESET POLICY_DENIED` means you need to add an allow rule
+      before shipping. See [policy.md](policy.md) §"Adding a rule
+      safely."
 
-- [ ] **The shared key is the one in the bundle config.**
-      Re-read `client_config.json` immediately before bundling. Easy
-      mistake: edit a config, send the *previous* config because you
-      copied the wrong file.
+- [ ] **Server `client_template` is set.** `beacongate-admin
+      add-client` requires a `client_template` block in
+      `server_config.json`. If absent, the CLI's error tells you
+      exactly what to add.
 
 ---
 
-## Build the bundle
-
-If you installed BeaconGate from a release tarball (recommended for
-v1.1.0+), the `beacongate-client-android-arm64` binary is already in
-the tarball — verified by `cosign verify-blob` at unpack time. You
-don't need to rebuild.
-
-If you built from source (or want to refresh the Android binary
-locally):
+## Generate the per-user config
 
 ```sh
-make build-android
-ops/prepare-bundle.sh \
-  --binary bin/beacongate-client-android-arm64 \
-  --config client_config.json \
-  --out /tmp/bundle-$(date +%Y%m%d).zip \
-  --vps-ip 203.0.113.5            # your VPS public IP, for verify.sh's leak check
+ssh beacongate-vps "cd /etc/beacongate && \
+  beacongate-admin add-client \
+    --server-config server_config.json \
+    --name alice \
+    --output alice.json && \
+  systemctl restart beacongate-server"
+ssh beacongate-vps "cat /etc/beacongate/alice.json" > /tmp/alice.json
 ```
 
-`prepare-bundle.sh` runs `beacongate-client -validate-only` on the
-config before zipping. **A bundle is never produced from a
-config that fails validation** — fail-closed by design.
+`add-client` appends the new client to the server's allowlist and
+writes a ready-to-import JSON config containing the per-client key,
+the server URL, and the transport options.
 
-**Note on supply-chain integrity:** the operator-prepared bundle's
-ZIP is *not* cosign-signed (it's built locally on your machine, not
-by the release pipeline). The trust chain for the bundle is:
-`cosign-signed binary in the release tarball → unpacked into your
-local bin/ → re-zipped with config and verify.sh by you → SHA-256
-of the resulting ZIP printed for out-of-band check`. The friend
-receiving the bundle is trusting *you* (not GitHub's release pipeline)
-that the ZIP is what you intended. The SHA-256 check makes that
-trust verifiable.
+- [ ] **The config validates.** Run
+      `beacongate-client -validate-only -config /tmp/alice.json`. A
+      non-zero exit means do not ship.
+
+- [ ] **The key in the config is the one the server will accept.**
+      Easy mistake: edit `server_config.json`, restart, then ship a
+      config that was generated before the restart. If you've rotated
+      keys, re-run `add-client` after the restart.
 
 ---
 
-## Before you send the bundle
+## Before you send the config
 
-- [ ] **The bundle's `verify.sh` passes on your own Linux box.**
-      Unzip it on a Linux laptop, run the binary against your live
-      server, point `curl -x socks5h://127.0.0.1:1080` and
-      `curl http://127.0.0.1:9091/api/status` at it, and confirm all
-      three checks pass. Don't ship a bundle you haven't yourself
-      booted from cold.
+- [ ] **Test the config end-to-end from your own laptop.**
+      ```sh
+      beacongate-client -config /tmp/alice.json -control-addr 127.0.0.1:9091 &
+      curl -x socks5h://127.0.0.1:1080 https://api.ipify.org
+      ```
+      The returned IP should be your VPS's public IP. Don't ship a
+      config you haven't yourself booted from cold.
 
 - [ ] **SHA-256 logged out of band.**
-      `prepare-bundle.sh` printed a SHA-256 — write it down somewhere
-      you can read after the bundle has left your machine (a notes
-      file, a 1Password note, a separate channel). When the friend
-      receives the file, you can compare hashes and know they got the
-      bundle you sent, not a corrupted or substituted one.
+      ```sh
+      sha256sum /tmp/alice.json
+      ```
+      Save the hash somewhere you can read after the file has left
+      your machine (notes file, password manager, separate channel).
+      The user compares it on receipt and knows they got what you
+      sent, not a corrupted or substituted file.
 
-- [ ] **Friend has a way to reach you for support.**
-      The first time anyone runs this on a new phone, *something*
-      will go wrong. The friend will need to send you a screenshot
-      of `verify.sh`'s output and a few log lines. Make sure they
-      know how to do that.
+- [ ] **The user has a way to reach you for support.** First-run
+      installs hit edge cases. The user will need to send you a
+      screenshot of the app's status screen and a few log lines.
+      Confirm they know how to do that.
 
-- [ ] **You've sent them the link to [android-termux.md](android-termux.md).**
-      The bundle's `README.txt` is the short version; the doc is the
-      full walkthrough. Don't make them guess.
+- [ ] **The user has a link to the install walkthrough** —
+      [mobile/android/README.md](../mobile/android/README.md), or the
+      legacy [android-termux.md](android-termux.md) if you're handing
+      over a Termux bundle instead.
 
 ---
 
@@ -111,46 +104,41 @@ trust verifiable.
       ```sh
       journalctl -u beacongate-server -f
       ```
-      You're looking for a `session.open` event tagged with the
-      `client_id` from the friend's config. If you see
-      `tunnel.auth_failed`, the keys diverged — re-issue the bundle.
+      Look for `session.open` tagged with the user's `client_id`. A
+      `tunnel.auth_failed` means the key in the shipped config does
+      not match the server — re-issue.
 
-- [ ] **Confirm the friend's `verify.sh` passes** before walking away.
-      A successful `bash verify.sh` on the phone is the only thing
-      that proves the disguise is working end-to-end.
-
-- [ ] **Tell them about `termux-wake-lock`.**
-      The single most common Phase-1 support call is "it worked for
-      five minutes then stopped." That's Android killing Termux. The
-      friend needs to run `termux-wake-lock` every session — it's in
-      the bundle README, but reminding them face-to-face cuts the
-      first-week support load roughly in half.
+- [ ] **Confirm the user reports a green status screen** before
+      walking away. On the native Android app, that means status
+      reads *Connected* and a destination they normally cannot reach
+      loads.
 
 ---
 
-## Routine maintenance (after the friend is running)
+## Routine maintenance
 
-- [ ] **Rotate the shared key every few months.**
+- [ ] **Rotate the master key every few months.**
       `beacongate-admin gen-key`, update `server_config.json`, restart
-      the server, build a new bundle, hand it over. The old key is
-      hard-cut.
+      the server, re-issue per-user configs with `add-client`. The
+      old keys are hard-cut.
 
-- [ ] **For appsscript mode: watch quota.**
-      `script_keys` rotation is handled per-bundle; if the friend
-      reports occasional outages around the same time of day, that's
-      the daily ~20K UrlFetchApp quota. Add another deployment under
-      another Google account and reissue the config.
+- [ ] **For appsscript mode: watch quota.** If the user reports
+      occasional outages around the same time of day, that's the
+      ~20,000-invocations-per-Google-account daily ceiling. Add
+      another deployment under another Google account and re-issue
+      the config.
 
-- [ ] **Review `RESET POLICY_DENIED` events monthly.**
-      Real users hit edges that synthetic tests don't. Skim the
-      server logs for `tunnel.policy_denied` and decide whether each
-      one is a legitimate destination that should be allowed.
+- [ ] **Review `RESET POLICY_DENIED` events monthly.** Real users hit
+      edges that synthetic tests don't. Skim the server logs for
+      `tunnel.policy_denied` and decide whether each destination
+      should be allowed.
 
 ---
 
-## Related runbooks
+## Related
 
-- [docs/android-termux.md](android-termux.md) — the friend's setup walkthrough
-- [docs/troubleshooting.md](troubleshooting.md) — when something goes wrong
-- [docs/policy.md](policy.md) — adding/removing/auditing policy rules
+- [mobile/android/README.md](../mobile/android/README.md) — native Android end-user walkthrough
+- [docs/android-termux.md](android-termux.md) — legacy Termux walkthrough (Phase 1 path)
+- [docs/troubleshooting.md](troubleshooting.md) — failure-mode runbook
+- [docs/policy.md](policy.md) — adding, removing, auditing policy rules
 - [docs/deployment.md](deployment.md) — server deployment and config templates

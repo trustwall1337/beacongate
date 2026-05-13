@@ -530,20 +530,14 @@ mode, see [troubleshooting.md](troubleshooting.md). Quick reference:
 
 ## Handing the client to an Android end-user
 
-Phase 1 does not ship a native APK. The intended flow is: cross-compile
-the client for `linux/arm64`, package a bundle for the friend, and
-have them run the binary in [Termux](https://termux.dev) with NekoBox
-or v2rayNG consuming the local SOCKS5 listener.
+The supported path is the **native Android app** under
+`mobile/android/`. Build the release APK on your laptop with
+`make android-apk`, install via `adb`, and import a per-user JSON
+config produced by `beacongate-admin add-client`. Full walkthrough in
+[mobile/android/README.md](../mobile/android/README.md).
 
-```sh
-make build-android
-ops/prepare-bundle.sh \
-  --binary bin/beacongate-client-android-arm64 \
-  --config client_config.json \
-  --vps-ip $(curl -fsS https://api.ipify.org) \
-  --out /tmp/beacongate-bundle.zip
-```
-
-The full operator-side procedure is in
-[operator-handoff-checklist.md](operator-handoff-checklist.md); the
-end-user setup is in [android-termux.md](android-termux.md).
+A legacy Termux + SOCKS-client path is documented in
+[android-termux.md](android-termux.md) for environments where
+installing the APK is not an option. The operator-side handoff
+checklist for either path is in
+[operator-handoff-checklist.md](operator-handoff-checklist.md).

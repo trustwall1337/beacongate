@@ -4,9 +4,11 @@ This is the operator's first-response guide when something goes wrong
 in production. It covers both transports (`https` and `appsscript`)
 and both server- and client-side failures.
 
-If the problem is on the friend's phone, share
-[android-termux.md](android-termux.md) — it covers Termux-specific
-issues (battery doze, NekoBox DNS leak) that aren't repeated here.
+If the problem is on the end user's phone, point them at
+[mobile/android/README.md](../mobile/android/README.md) for the
+native Android app, or [android-termux.md](android-termux.md) for the
+legacy Termux path (battery-doze + NekoBox DNS issues are documented
+there and not repeated here).
 
 For deployment from scratch, see [deployment.md](deployment.md).
 For policy-rule operations, see [policy.md](policy.md).
@@ -218,8 +220,8 @@ Common errors:
 
 ### Client connects locally but tunnel is unhealthy
 
-The SOCKS5 listener is up (so `verify.sh` Step 1's local connect
-works) but traffic doesn't actually exit through the server.
+The SOCKS5 listener is up (a local connect to `127.0.0.1:1080`
+succeeds) but traffic doesn't actually exit through the server.
 
 ```sh
 # 1. confirm a session is opening on the server side:
@@ -268,12 +270,12 @@ sudo sed -i.bak "s|\"key\": \".*\"|\"key\": \"$NEW_KEY\"|" /etc/beacongate/serve
 # 3. restart the server
 sudo systemctl restart beacongate-server
 
-# 4. all existing clients will now fail with auth_failed.
-#    rebuild and redistribute bundles:
-make build && make build-android
-ops/prepare-bundle.sh --binary bin/beacongate-client-android-arm64 \
-  --config client_config.json --out /tmp/bundle.zip --vps-ip <vps-ip>
-# distribute to friends; their old bundles stop working immediately.
+# 4. all existing clients now fail with auth_failed. Re-issue
+#    per-user configs via:
+beacongate-admin add-client --server-config /etc/beacongate/server_config.json \
+  --name alice --output /tmp/alice.json
+# distribute the new configs out-of-band; old configs stop working
+# immediately.
 ```
 
 There is no graceful rotation in v1.1 — the wire envelope is keyed
@@ -284,7 +286,7 @@ window.
 
 ## When to escalate to logs vs metrics
 
-Phase 1 ships structured `slog` output to stderr. Useful one-liners:
+The server emits structured `slog` output to stderr. Useful one-liners:
 
 ```sh
 # all auth failures in last 1000 lines (potential brute-force)
@@ -297,9 +299,9 @@ journalctl -u beacongate-server | grep session.open | wc -l
 journalctl -u beacongate-server -o cat | grep '"client_id":"client-laptop-mr"'
 ```
 
-For richer observability (Prometheus, dashboards) — see Phase 2;
-Phase 1 deliberately ships only the journal-based path because
-Phase-1 deployment is "one operator, one VPS."
+A Prometheus / dashboard surface is open scope. Today's deployments
+use the journal-based path because the canonical deployment shape is
+"one operator, one VPS."
 
 ---
 
