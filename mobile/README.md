@@ -1,33 +1,25 @@
-# Mobile (Phase 4)
+# Mobile
 
-This directory is reserved for BeaconGate mobile clients (Phase 4 in
-[../docs/planning/PLAN.md](../docs/planning/PLAN.md)). Mobile is in scope
-but **strategy first** — the implementation language and architecture
-are not yet decided.
+BeaconGate's mobile subtree. Each platform's app is self-contained
+under its own directory.
 
-See [../docs/planning/STEP-4-mobile-strategy.md](../docs/planning/STEP-4-mobile-strategy.md)
-for the program brief.
+## Subtree layout
 
-## Subtree layout (current placeholders)
-
-- `ios/` — reserved for an iOS app (Xcode project, Swift/SwiftUI).
-- `android/` — reserved for an Android app (Gradle, Kotlin).
-
-Whether mobile shares the same engine as the Go client (via gomobile,
-ffi, or a clean reimplementation per platform) is an open architectural
-question. The current planning doc requires a written decision before
-any implementation work starts.
+- [`android/`](android/README.md) — native Android app. Shipped: Kotlin
+  UI + system VPN service, with the Go client core (`engine/*`,
+  `client/runtime`) exposed via `gomobile bind`.
+- [`bindings/`](bindings/) — the gomobile-bind facade
+  (`ImportConfig`, `StartTunnel`, `StopTunnel`, …) consumed by the
+  Android app. The same package is the integration point for any
+  future mobile platform that uses gomobile.
+- [`ios/`](ios/README.md) — reserved for an iOS app (language and
+  architecture TBD).
 
 ## Communication contract
 
 Same protocol as desktop and the Go client: encrypted batches over an
 allowed transport, defined in [../docs/protocol.md](../docs/protocol.md).
-Mobile platforms may need additional transport implementations
-(e.g. background-friendly fronting) which would live alongside the
-existing transports in `engine/transport/` if Go-shared, or inside this
-mobile/ subtree if platform-native.
-
-## Until then
-
-These directories are placeholders so the planned monorepo layout is
-visible. Nothing builds from here yet.
+Mobile platforms may need additional transport implementations (e.g.
+background-friendly fronting); those live alongside the existing
+transports in `engine/transport/` if Go-shared, or inside this subtree
+if platform-native.

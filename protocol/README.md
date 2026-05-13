@@ -10,7 +10,7 @@ from a single source.
 
 | Path | Contents |
 | --- | --- |
-| `../docs/protocol.md` | Human-readable specification (v1.0, normative). |
+| `../docs/protocol.md` | Human-readable specification (v1.1, normative). |
 | `schemas/` *(future)* | Machine-readable schemas — likely JSON Schema for the envelope and per-message shapes. |
 | `idl/` *(future)* | If we adopt an IDL (proto, flatbuffers, capnp), source files live here. |
 | `vectors/` *(future)* | Cross-language test vectors: known-good envelopes, ciphertexts, and edge cases. |

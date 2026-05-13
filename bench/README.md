@@ -1,8 +1,7 @@
 # BeaconGate benchmarks
 
 This directory holds reference performance numbers and the procedure
-for re-measuring them. Plan A7 #8–13 defines the budgets these
-measurements feed into.
+for re-measuring them.
 
 ## Two scopes
 

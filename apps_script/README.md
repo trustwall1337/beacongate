@@ -6,32 +6,22 @@ BeaconGate client posts encrypted batches to your deployment of this
 script at `https://script.google.com/macros/s/{DEPLOYMENT_ID}/exec`;
 the script forwards them as binary to your BeaconGate VPS server.
 
-## Why this script does base64 (and why we DON'T want to "simplify" it)
+## Why this script does base64
 
-A naive forwarder would pass `e.postData.contents` straight into
-`UrlFetchApp.fetch` and similarly forward the response verbatim.
-That works only when the BeaconGate server speaks the same
-text-shaped wire as Apps Script.
+BeaconGate's design keeps the VPS server **binary-only** across both
+transports (`https` and `appsscript`); the server has no transport
+awareness. Apps Script, by contrast, exposes `e.postData.contents`
+as a JavaScript string. To bridge those constraints without
+contaminating the server, the wire body the client sends is text-safe
+**base64**, and this script handles the text↔binary boundary itself:
 
-BeaconGate's design deliberately keeps the VPS server binary-only
-across both transports, so the Apps Script side does the
-text↔binary boundary itself:
+- Inbound: decode base64 → binary → forward to the VPS.
+- Outbound: receive binary from the VPS → base64-encode → return to
+  the client.
 
-- The **BeaconGate VPS server stays binary-only** for both transports
-  (`https` and `appsscript`). The server has no transport awareness;
-  it cannot tell whether a request came via direct HTTPS or via Apps
-  Script. That's the correct layering.
-- Apps Script's `e.postData.contents` is a **JavaScript string** (text-
-  oriented). The wire body the client sends is text-safe **base64**
-  precisely because of this constraint.
-- This script decodes the base64 to binary on the way in and re-
-  encodes the response on the way out. Total cost: ~10 lines of
-  JavaScript, executed inside Apps Script's VM. The server stays
-  clean.
-
-If a future contributor proposes "simplify Code.gs back to verbatim
-forwarding," that is wrong: it would push base64-awareness into the
-BeaconGate VPS server, which the v1.1 plan explicitly rejected.
+The cost is ~10 lines of JavaScript executed inside the Apps Script
+VM. Moving this boundary into the server would push base64 awareness
+into a layer that has no business knowing about transports.
 
 ## Setup
 
