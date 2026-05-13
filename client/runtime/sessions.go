@@ -55,26 +55,23 @@ const (
 	defaultCoalesceWindow = 5 * time.Millisecond
 )
 
-// Pump drives the client transport. It runs SIX goroutines:
+// Pump drives the client transport. It runs FOUR goroutines:
 //
-//   - Four outbound workers fire HTTP POSTs that carry session traffic
+//   - Two outbound workers fire HTTP POSTs that carry session traffic
 //     (OPEN/DATA/CLOSE/RESET). When the outbox is empty, each parks on
-//     the shared flush channel — none issue idle long-polls, so a
+//     the shared flush channel — neither issues idle long-polls, so a
 //     freshly-enqueued frame fires its POST without waiting for any
-//     standing PROBE to return. Four workers let bandwidth-heavy
-//     single-bucket workloads (YouTube video on one Apps Script
-//     account) post ~4× concurrent chunk requests — enough to sustain
-//     360p ABR. Operators with multi-account script_keys get further
-//     fan-out via the carrier's bucket rotation.
+//     standing PROBE to return. Two workers let parallel session
+//     handshakes (e.g. YouTube's ~8 concurrent CDN hosts) post their
+//     ClientHellos in parallel rather than serializing through one
+//     Apps Script round-trip (~2 s overhead each).
 //   - Two idle workers each keep a PROBE long-poll standing at the
 //     server whenever there are live sessions. They are the receive-
 //     side pipe for upstream-originated bytes that arrive *between*
 //     outbound POSTs. Two concurrent long-polls = effectively
 //     continuous pickup for bursty downloads (CDN video chunks, large
 //     responses) since one polls while the other is short-circuiting
-//     on data. Capped at 2 because each idle worker consumes ~one
-//     long-poll per 8 s of steady state; three would exceed the
-//     per-account daily quota under normal use.
+//     on data.
 //
 // Why split outbound from idle: with one in-flight request, every TLS
 // handshake leg serializes through one Apps Script round-trip and a
@@ -85,10 +82,10 @@ const (
 // for the next outbound. See server/runtime: defaultActiveDrainWindow
 // for the matching server-side rationale.
 //
-// Channel capacities: flush has cap numOutboundWorkers (4) and
-// flushIdle has cap numIdleWorkers (2) so a burst of signalFlush
-// calls (non-blocking) can wake every parked worker without losing
-// signals to the default-branch drop.
+// Channel capacities: flush and flushIdle are cap-2 so a single
+// signalFlush call (which is non-blocking) can wake both outbound
+// workers in turn — without this, signalFlush would deliver to
+// exactly one parked worker per call.
 //
 // Ordering: the server's drainAllForClient is atomic per-client, so
 // each upstream chunk is delivered exactly once via exactly one POST.
@@ -160,8 +157,8 @@ func NewPump(rt *Runtime) *Pump {
 		idleHold:       defaultIdleHold,
 		inboxCap:       defaultInboxCapacity,
 		sessions:       map[string]*ClientSession{},
-		flush:          make(chan struct{}, numOutboundWorkers),
-		flushIdle:      make(chan struct{}, numIdleWorkers),
+		flush:          make(chan struct{}, 2),
+		flushIdle:      make(chan struct{}, 2),
 		stop:           make(chan struct{}),
 		stopped:        make(chan struct{}),
 		coalesceWindow: defaultCoalesceWindow,
@@ -477,28 +474,15 @@ func (p *Pump) removeSession(id string) {
 }
 
 // numOutboundWorkers and numIdleWorkers control parallelism for outbound
-// POSTs and standing idle long-polls respectively.
-//
-// Outbound = 4 lets bandwidth-heavy single-bucket workloads (YouTube video
-// against one Apps Script account) get closer to the per-account
-// throughput ceiling by issuing more parallel POSTs. The fundamental
-// per-call overhead (~3.5 s on free-tier consumer accounts) caps each
-// stream at ~73 KB/s; four parallel workers push the aggregate toward
-// ~290 KB/s which is enough to sustain YouTube 360p with margin. Beyond 4
-// the marginal gain shrinks (HTTP/2 stream limits, server-side serial
-// drain) and the per-account daily runtime budget (90 min/day for
-// consumer Apps Script) is burned ~4× faster than wall clock.
-//
-// Idle = 2 stays where it is: each idle worker holds an 8 s long-poll,
-// so 2 idle workers = ~1 poll per 4 s steady state = ~22 K polls/day,
-// at the per-account quota ceiling. Three idle workers would push 32 K/
-// day and trip quota throttling under normal use.
-//
-// Operators with multi-account script_keys (recommended for sustained
-// video) get this parallelism multiplied by bucket count via the
-// carrier-layer bucket rotation; the values here are per-Pump.
+// POSTs and standing idle long-polls respectively. Two of each is the
+// sweet spot for Apps Script: outbound lets parallel session handshakes
+// (YouTube's CDN host fan-out) fire concurrent POSTs; idle gives
+// continuous pickup coverage for upstream-pushed bytes that arrive
+// between active POSTs. Two idle long-polls at 8 s/poll ≈ 1 poll per 4 s
+// steady state ≈ 22 K polls/day — at the per-account quota ceiling but
+// not over. If quota pressure shows up under real load, drop idle to 1.
 const (
-	numOutboundWorkers = 4
+	numOutboundWorkers = 2
 	numIdleWorkers     = 2
 )
 
