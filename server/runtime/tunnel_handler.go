@@ -378,6 +378,29 @@ func classifyDialError(err error) string {
 	}
 }
 
+// handleData processes one inbound DATA frame for a client session.
+//
+// With multiple outbound POST workers on the client side, frames for the
+// same session can land here out of order (Apps Script latency variance
+// lets a later POST return before an earlier one). To preserve byte
+// ordering on the upstream TCP socket without rejecting traffic, the
+// handler buffers out-of-order frames in ss.recvBuffer keyed by seq and
+// drains them in order once the missing seq arrives.
+//
+// Three seq cases:
+//   - seq == nextRecvSeq: deliver this frame plus any contiguous buffered
+//     successors in one pass.
+//   - seq > nextRecvSeq: buffer (gap; waiting for the missing frame).
+//   - seq < nextRecvSeq: silently drop (idempotent-retry duplicate, e.g.
+//     a transport-level redeliver of a frame the server already accepted).
+//
+// Legacy clients that don't populate seq (m.Seq == nil) take the
+// pass-through path — no reordering possible without seq numbers.
+//
+// Lock ordering is writeMu → mu so the actual conn.Write calls are
+// serialized per session; otherwise two concurrent handlers could each
+// drain a contiguous range under mu, release mu, then race each other
+// on conn.Write and put bytes on the upstream out of order.
 func (s *Server) handleData(clientID string, m protocol.Message) []protocol.Message {
 	ss := s.lookup(clientID, m.SessionID)
 	if ss == nil {
@@ -386,28 +409,11 @@ func (s *Server) handleData(clientID string, m protocol.Message) []protocol.Mess
 			Code: "INVALID_STATE", Reason: "no such session",
 		}}
 	}
-	ss.mu.Lock()
-	expected := ss.nextRecvSeq
-	if m.Seq == nil || *m.Seq != expected {
-		got := uint64(0)
-		if m.Seq != nil {
-			got = *m.Seq
-		}
-		ss.mu.Unlock()
-		ss.terminate(fmt.Errorf("bad sequence: want %d", expected))
-		s.unregister(clientID, m.SessionID)
-		s.log().Warn("session.bad_sequence",
-			"client_id", clientID,
-			"session_id", m.SessionID,
-			"expected_seq", expected, "got_seq", got)
-		return []protocol.Message{{
-			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
-			Code: "BAD_SEQUENCE", Reason: "out of order DATA",
-		}}
-	}
-	ss.nextRecvSeq++
-	ss.lastActivity = time.Now()
-	ss.mu.Unlock()
+
+	// Decompress the inbound payload BEFORE entering the serialization
+	// path; decompression is CPU-bound and would otherwise hold writeMu
+	// for the duration. Wire bytes are independent per frame, so doing
+	// this outside the lock is safe.
 	payload := m.Data
 	if m.Compressed {
 		raw, err := protocol.DecompressData(payload)
@@ -421,14 +427,86 @@ func (s *Server) handleData(clientID string, m protocol.Message) []protocol.Mess
 		}
 		payload = raw
 	}
-	if err := ss.writeUpstream(payload); err != nil {
-		ss.terminate(err)
-		s.unregister(clientID, m.SessionID)
-		// C4: don't echo upstream errno detail to the client.
-		return []protocol.Message{{
-			Type: protocol.MessageTypeReset, SessionID: m.SessionID,
-			Code: "PEER_ERROR", Reason: "upstream write failed",
-		}}
+
+	// Legacy no-seq path: pass through directly. Cannot reorder without
+	// seq numbers; any out-of-order delivery from a legacy client is the
+	// client's responsibility to avoid.
+	if m.Seq == nil {
+		if err := ss.writeUpstream(payload); err != nil {
+			ss.terminate(err)
+			s.unregister(clientID, m.SessionID)
+			return []protocol.Message{{
+				Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+				Code: "PEER_ERROR", Reason: "upstream write failed",
+			}}
+		}
+		return nil
+	}
+
+	seq := *m.Seq
+
+	ss.writeMu.Lock()
+	defer ss.writeMu.Unlock()
+
+	ss.mu.Lock()
+	switch {
+	case seq < ss.nextRecvSeq:
+		// Duplicate (idempotent-retry replay). Drop silently.
+		ss.mu.Unlock()
+		return nil
+	case seq > ss.nextRecvSeq:
+		// Future frame — buffer until the gap fills.
+		if ss.recvBuffer == nil {
+			ss.recvBuffer = map[uint64][]byte{}
+		}
+		if _, dup := ss.recvBuffer[seq]; !dup && len(ss.recvBuffer) >= maxInboundReorderBuffer {
+			expected := ss.nextRecvSeq
+			ss.mu.Unlock()
+			ss.terminate(fmt.Errorf("inbound reorder buffer overflow at seq=%d (expected=%d)", seq, expected))
+			s.unregister(clientID, m.SessionID)
+			s.log().Warn("session.bad_sequence",
+				"client_id", clientID,
+				"session_id", m.SessionID,
+				"expected_seq", expected, "got_seq", seq,
+				"reason", "reorder_buffer_overflow")
+			return []protocol.Message{{
+				Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+				Code: "BAD_SEQUENCE", Reason: "reorder buffer overflow",
+			}}
+		}
+		ss.recvBuffer[seq] = payload
+		ss.lastActivity = time.Now()
+		ss.mu.Unlock()
+		return nil
+	}
+
+	// seq == ss.nextRecvSeq: gather this frame plus all contiguous
+	// buffered successors, then release mu and write them in order
+	// under writeMu.
+	toWrite := [][]byte{payload}
+	ss.nextRecvSeq++
+	for {
+		buffered, ok := ss.recvBuffer[ss.nextRecvSeq]
+		if !ok {
+			break
+		}
+		toWrite = append(toWrite, buffered)
+		delete(ss.recvBuffer, ss.nextRecvSeq)
+		ss.nextRecvSeq++
+	}
+	ss.lastActivity = time.Now()
+	ss.mu.Unlock()
+
+	for _, b := range toWrite {
+		if err := ss.writeUpstream(b); err != nil {
+			ss.terminate(err)
+			s.unregister(clientID, m.SessionID)
+			// C4: don't echo upstream errno detail to the client.
+			return []protocol.Message{{
+				Type: protocol.MessageTypeReset, SessionID: m.SessionID,
+				Code: "PEER_ERROR", Reason: "upstream write failed",
+			}}
+		}
 	}
 	return nil
 }
