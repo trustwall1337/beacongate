@@ -452,7 +452,14 @@ func (s *Server) handleUDPAssociate(conn net.Conn, reqAddr string, reqPort uint1
 
 	buf := make([]byte, 64*1024)
 	lastActivity := time.Now()
-	const udpAssocIdleTTL = 8 * time.Second
+	// DNS responses come back within ~500ms over TCP DNS upstream
+	// (or instantly from cache). Any idle time beyond 1.5s means
+	// no more packets are coming for this flow — release the slot
+	// so a new query can take it. Earlier value (8s) held zombie
+	// associations long enough that Chrome's DNS-prefetch burst
+	// blew past maxUDPAssoc and triggered a cascade of
+	// "general SOCKS server failure" responses.
+	const udpAssocIdleTTL = 1500 * time.Millisecond
 	for {
 		_ = relay.SetReadDeadline(time.Now().Add(1 * time.Second))
 		n, srcAddr, err := relay.ReadFrom(buf)

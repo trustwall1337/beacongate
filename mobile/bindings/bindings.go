@@ -145,9 +145,14 @@ func StartTunnel(cfg *ConfigSnapshot) error {
 	// Android VPN path sends DNS as UDP; tun2socks uses SOCKS5 UDP ASSOCIATE
 	// for that traffic, so mobile must enable it on the local SOCKS listener.
 	srv.EnableUDPAssociate(true)
-	// Keep association fan-out bounded to avoid FD exhaustion on noisy
-	// mobile/emulator backgrounds.
-	srv.SetUDPAssociateLimit(48)
+	// Concurrent-association cap: tun2socks creates a NEW
+	// ASSOCIATE per UDP flow (5-tuple), and Chrome's DNS-prefetch
+	// burst fires 50+ queries per page load. With the earlier
+	// limit of 48 we'd be rejected mid-burst before our 1.5s
+	// idle TTL freed slots. 512 leaves comfortable headroom
+	// without endangering FDs (we raise RLIMIT_NOFILE to 8192
+	// at StartVpn — see mobile/bindings/tun2socks.go).
+	srv.SetUDPAssociateLimit(512)
 	if cfg.raw.Socks.Username != "" {
 		srv.SetAuth(socks.AuthConfig{
 			Username: cfg.raw.Socks.Username,
